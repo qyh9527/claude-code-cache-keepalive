@@ -8,9 +8,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { fileURLToPath } from 'node:url';
 
 const SCRIPT = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'cache-keepalive.mjs');
-const ROOT = path.join(os.tmpdir(), 'cache-keepalive-test', 'cases');
-fs.rmSync(ROOT, { recursive: true, force: true });
-fs.mkdirSync(ROOT, { recursive: true });
+const ROOT = fs.mkdtempSync(path.join(os.tmpdir(), 'cache-keepalive-test-'));
 const WAKE1 = '[cache-keepalive] 后台任务仍在运行，这是自动缓存保活唤醒（第 1 次）。请只回复“保活”两个字，不要调用任何工具，不要输出任何其他内容。\n';
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const iso = (ms) => new Date(ms).toISOString();
@@ -423,3 +421,5 @@ results.sort((a, b) => a.name.localeCompare(b.name, 'en', { numeric: true }));
 const fail = results.filter((r) => !r.ok);
 console.log(`## ${results.length - fail.length}/${results.length} 通过，用时 ${Math.round((Date.now() - t0) / 1000)}s`);
 for (const r of results) console.log(`${r.ok ? 'PASS' : 'FAIL'} ${r.name} :: ${r.detail}`);
+process.exitCode = fail.length ? 1 : 0;
+fs.rmSync(ROOT, { recursive: true, force: true });

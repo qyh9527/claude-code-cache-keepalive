@@ -161,7 +161,7 @@ Common `reason` values in the log:
 | `stale-anchor` | Cache already older than 300 s |
 | `non-claude-model` | Upstream model is not Claude |
 | `cap` | 8 wakes or 60 minutes reached |
-| `transcript-unreadable` | Could not read the transcript; exits to be safe |
+| `transcript-unreadable` | Could not read the transcript or cover newly added data within the tail window; exits to be safe |
 | `timeout-guard` | Ran out of time before deciding |
 | `error` | Unexpected error, logged and ignored |
 
@@ -184,11 +184,12 @@ These environment variables exist for tests:
 ## Tests
 
 ```sh
-node test/run.mjs            # the hook: 31 scenarios in parallel, about 9 seconds
-node test/install.test.mjs   # the installer: 8 scenarios
+node test/run.mjs                 # hook behavior scenarios, about 20 seconds
+node test/install.test.mjs        # installer; POSIX permission checks are skipped on Windows
+node --test test/runner.test.mjs   # successful and failed test-runner exit codes
 ```
 
-Every scenario uses its own temp directory, so your real `~/.claude`, logs, and proxy database are never touched. Each hook scenario also gets its own transcript and a small SQLite database.
+Every run and scenario uses its own temp directory, so your real `~/.claude`, logs, and proxy database are never touched. Each hook scenario also gets its own transcript and a small SQLite database. Any failed check makes the test runner exit nonzero, so it can be used directly in CI.
 
 ## Limitations
 

@@ -168,7 +168,7 @@ node install.mjs --any-model   # 想切回默认，不带这个参数再运行�
 | `stale-anchor` | 缓存已超过 300 秒 |
 | `non-claude-model` | 上游不是 Claude |
 | `cap` | 已唤醒 8 次或已满 60 分钟 |
-| `transcript-unreadable` | 读不到 transcript，保守退出 |
+| `transcript-unreadable` | 读不到 transcript，或尾部窗口无法覆盖新增数据，保守退出 |
 | `timeout-guard` | 来不及决策就超时 |
 | `error` | 意外错误，已记录并忽略 |
 
@@ -191,11 +191,12 @@ node install.mjs --any-model   # 想切回默认，不带这个参数再运行�
 ## 测试
 
 ```sh
-node test/run.mjs            # hook 本身：并行跑 31 个场景，约 9 秒
-node test/install.test.mjs   # 安装器：8 个场景
+node test/run.mjs                 # hook 行为场景，约 20 秒
+node test/install.test.mjs        # 安装器（POSIX 权限检查在 Windows 上跳过）
+node --test test/runner.test.mjs   # 测试入口的成功／失败退出码
 ```
 
-每个场景都用独立的临时目录，不会碰真实的 `~/.claude`、日志和代理数据库。hook 的每个场景还各有自己的 transcript 和迷你 SQLite 库。
+每次运行和每个场景都用独立的临时目录，不会碰真实的 `~/.claude`、日志和代理数据库。hook 的每个场景还各有自己的 transcript 和迷你 SQLite 库。任何检查失败时测试入口都会返回非零退出码，可直接用于 CI。
 
 ## 已知限制
 
