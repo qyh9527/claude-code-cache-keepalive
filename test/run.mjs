@@ -15,6 +15,16 @@ const WAKE1 = '[cache-keepalive] 后台任务仍在运行，这是自动缓存�
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const iso = (ms) => new Date(ms).toISOString();
 
+async function waitForState(c, session) {
+  const file = path.join(c.state, session + '.json');
+  const deadline = Date.now() + 5000;
+  while (Date.now() < deadline) {
+    try { return JSON.parse(fs.readFileSync(file, 'utf8')); } catch { /* 尚未写入 */ }
+    await sleep(10);
+  }
+  throw new Error('hook state was not created');
+}
+
 function mkCase(name) {
   const dir = path.join(ROOT, name);
   fs.mkdirSync(path.join(dir, 'state'), { recursive: true });
@@ -346,6 +356,26 @@ const cases = {
     dbAdd(c.db, [{ session: 's39', startAgoMs: 2000 }]);
     const r = await run(c, inp(c, 's39', [SUB]), { CACHE_KEEPALIVE_FIRE_AFTER_S: '6' });
     check('主模型读取跳过 sidechain 与 <synthetic> 条目', isWake(r) && r.last.mainModel === 'claude-opus-5-5', brief(r) + ` main=${r.last?.mainModel}`);
+  },
+  async T40() {
+    await Promise.all([0, 300, 1500].map(async (delay) => {
+      const c = mkCase('T40-' + delay);
+      const p = run(c, inp(c, 's40', [SUB]), { CACHE_KEEPALIVE_SETTLE_S: '0', CACHE_KEEPALIVE_FIRE_AFTER_S: '35' });
+      const state = await waitForState(c, 's40');
+      await sleep(delay);
+      fs.appendFileSync(c.transcript, JSON.stringify({ type: 'user', isSidechain: false, timestamp: iso(state.periodStart + delay) }) + '\n');
+      const r = await p;
+      check(`T40 启动后 ${delay}ms 的新 user 立即算活动`, isExit(r, 'activity-transcript'), brief(r));
+    }));
+  },
+  async T41() {
+    const c = mkCase('T41');
+    const p = run(c, inp(c, 's41', [SUB]), { CACHE_KEEPALIVE_SETTLE_S: '0', CACHE_KEEPALIVE_FIRE_AFTER_S: '35' });
+    const state = await waitForState(c, 's41');
+    await sleep(300);
+    fs.appendFileSync(c.transcript, JSON.stringify({ type: 'assistant', timestamp: iso(state.periodStart + 300) }) + '\n');
+    const r = await p;
+    check('T41 迟到的本轮 Stop assistant 仍保留宽限', isWake(r), brief(r));
   },
 };
 

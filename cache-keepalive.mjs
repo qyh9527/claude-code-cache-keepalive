@@ -46,7 +46,7 @@ const ANCHOR_FALLBACK_MS = 30000;   // 查不到库时的兜底锚点：Stop 前
 const STALE_MS = 300000;            // 锚点比现在旧超过 5 分钟就不再唤醒（缓存早过期了）
 const SHELL_MAX_AGE_MS = 20 * 60 * 1000; // shell 任务存活超过 20 分钟视为常驻，不再保活
 const TRANSCRIPT_TAIL_BYTES = 256 * 1024; // transcript 活动检测只看最后 256KB
-const TRANSCRIPT_LAG_MS = 2000;     // 时间戳要晚于 hookStart+2s 才算活动
+const TRANSCRIPT_LAG_MS = 2000;     // 仅 assistant 留 2s，容忍本轮 Stop 的延迟写入；新 user 立即算活动
 const LOG_MAX_BYTES = 1024 * 1024;  // 日志超过 1MB 就轮转
 
 const TASK_TYPES = new Set(['subagent', 'shell', 'workflow']);
@@ -280,12 +280,12 @@ function checkTranscript(p, snap, hookStart) {
   if (cur.mtimeMs === snap.mtimeMs && cur.size === snap.size) return 'idle';
   const lines = readTranscriptTail(p, cur.size);
   if (lines === null) return 'unreadable';
-  const threshold = hookStart + TRANSCRIPT_LAG_MS;
   for (const line of lines) {
     const o = parseJsonLine(line);
     if (!o || !isMainTurnEntry(o)) continue;
     const ms = parseTsMs(o.timestamp);
-    if (ms !== null && ms > threshold) return 'active';
+    if (ms === null) continue;
+    if (o.type === 'user' ? ms >= hookStart : ms > hookStart + TRANSCRIPT_LAG_MS) return 'active';
   }
   return 'idle';
 }
