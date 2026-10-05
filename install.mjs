@@ -37,11 +37,17 @@ function fail(msg) {
 }
 const stamp = () => new Date().toISOString().replace(/[:.]/g, '-');
 
-// 判断一个 hook handler 是不是本工具装的：按脚本文件名识别（exec 形式与 shell 形式都认）
+// 只识别 node 实际执行的脚本；相似文件名及传给其他脚本的数据参数都不属于本工具。
+const portableBasename = (p) => p.replaceAll('\\', '/').split('/').at(-1);
 function isOurHandler(h) {
-  if (!h || typeof h !== 'object') return false;
-  const parts = [h.command, ...(Array.isArray(h.args) ? h.args : [])].filter((x) => typeof x === 'string');
-  return parts.some((p) => p.includes(SCRIPT_NAME));
+  if (!h || h.type !== 'command' || typeof h.command !== 'string') return false;
+  const words = [...h.command.matchAll(/"([^"]*)"|'([^']*)'|([^\s]+)/g)]
+    .map((match) => match[1] ?? match[2] ?? match[3]);
+  const executable = words.shift();
+  if (!executable || !/^node(?:\.exe)?$/i.test(portableBasename(executable))) return false;
+  const argv = [...words, ...(Array.isArray(h.args) ? h.args : [])];
+  if (argv[0] === '--') argv.shift();
+  return typeof argv[0] === 'string' && portableBasename(argv[0]) === SCRIPT_NAME;
 }
 
 function readSettings() {

@@ -17,7 +17,7 @@ function run(dir, ...flags) {
 }
 const settingsOf = (dir) => JSON.parse(fs.readFileSync(path.join(dir, 'settings.json'), 'utf8'));
 const ourHandlers = (s) =>
-  (s.hooks?.Stop ?? []).flatMap((g) => g.hooks ?? []).filter((h) => (h.args ?? []).some((a) => a.includes('cache-keepalive.mjs')));
+  (s.hooks?.Stop ?? []).flatMap((g) => g.hooks ?? []).filter((h) => h.command === 'node' && typeof h.args?.[0] === 'string' && h.args[0].replaceAll('\\', '/').endsWith('/hooks/cache-keepalive.mjs'));
 const backups = (dir) => fs.readdirSync(dir).filter((f) => f.startsWith('settings.json.bak-')).length;
 
 // 1. 全新安装：没有 settings.json
@@ -126,6 +126,31 @@ if (process.platform !== 'win32') {
     process.umask(oldUmask);
   }
   check('新配置为 0600 且保留原 mode 不受 umask 影响', freshRun.code === 0 && (fs.statSync(path.join(fresh, 'settings.json')).mode & 0o777) === 0o600 && preservedRun.code === 0 && mode() === 0o640);
+}
+
+// 11–12. 相似名字和普通参数原样保留；识别旧 exec、shell 和带空格的 Windows 路径。
+{
+  const d = path.join(ROOT, 'ownership');
+  fs.mkdirSync(d);
+  const others = [
+    { type: 'command', command: 'node verify-cache-keepalive.mjs' },
+    { type: 'command', command: 'node', args: ['/hooks/verify-cache-keepalive.mjs'] },
+    { type: 'command', command: 'node', args: ['audit.mjs', '/data/cache-keepalive.mjs'] },
+    { type: 'command', command: 'echo cache-keepalive.mjs' },
+    { type: 'command', command: 'node "C:\\Hooks\\verify-cache-keepalive.mjs"' },
+  ];
+  const ours = [
+    { type: 'command', command: 'node', args: ['/old/place/cache-keepalive.mjs'] },
+    { type: 'command', command: 'node "/old place/cache-keepalive.mjs" --any-model' },
+    { type: 'command', command: '"C:\\Program Files\\nodejs\\node.exe" "C:\\old place\\cache-keepalive.mjs"' },
+    { type: 'command', command: 'node -- cache-keepalive.mjs' },
+  ];
+  fs.writeFileSync(path.join(d, 'settings.json'), JSON.stringify({ hooks: { Stop: [{ hooks: [...others, ...ours] }] } }));
+  const installed = run(d);
+  const handlers = settingsOf(d).hooks.Stop.flatMap((g) => g.hooks);
+  check('安装保留其他 hook 并替换真实旧脚本', installed.code === 0 && handlers.length === others.length + 1 && JSON.stringify(handlers.slice(0, others.length)) === JSON.stringify(others) && ourHandlers(settingsOf(d)).length === 1);
+  const removed = run(d, '--uninstall');
+  check('卸载保留相似文件名和数据参数', removed.code === 0 && JSON.stringify(settingsOf(d).hooks.Stop.flatMap((g) => g.hooks)) === JSON.stringify(others));
 }
 
 fs.rmSync(ROOT, { recursive: true, force: true });
