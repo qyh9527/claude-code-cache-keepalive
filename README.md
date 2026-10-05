@@ -58,6 +58,11 @@ There are no npm dependencies; everything uses Node built-ins.
 
 ## Install
 
+> [!IMPORTANT]
+> You need Node.js 22.13+ and Claude Code 2.1.145+. There are no npm dependencies.
+
+### Quick install
+
 ```sh
 git clone https://github.com/qyh9527/claude-code-cache-keepalive.git
 cd claude-code-cache-keepalive
@@ -65,28 +70,32 @@ node install.mjs --dry-run   # preview the changes
 node install.mjs
 ```
 
-The installer:
+> [!TIP]
+> Run `--dry-run` first. It prints every change the installer would make and writes nothing. To upgrade later, run `git pull`, then `node install.mjs` again.
 
-- checks the Node version;
-- copies `cache-keepalive.mjs` into `~/.claude/hooks/`. It honours `CLAUDE_CONFIG_DIR`, or you can pass `--config-dir <dir>`;
-- adds the `Stop` hook to `settings.json`.
+| Command | What it does |
+|---|---|
+| `node install.mjs` | Install, or upgrade an existing install |
+| `node install.mjs --dry-run` | Show the planned changes without writing anything |
+| `node install.mjs --uninstall` | Remove the hook entry and the script; logs are kept |
+| `node install.mjs --any-model` | Install without the Claude-only restriction; see [Non-Claude models](#non-claude-models---any-model) |
+| `--config-dir <dir>` | Use another Claude config directory. The default is `$CLAUDE_CONFIG_DIR`, or `~/.claude` when that is unset |
 
-It is safe to run again; use it to upgrade as well. It also:
+The installer copies `cache-keepalive.mjs` into `<config dir>/hooks/` and adds the `Stop` hook to `settings.json`. Claude Code picks up the change without a restart.
 
-- validates `settings.json` first and changes nothing if the file is not valid JSON;
-- backs up `settings.json` (and an older copy of the script) before writing;
-- keeps every other key and hook as is;
-- replaces an earlier entry for this script instead of adding a duplicate.
+> [!NOTE]
+> The installer is safe to run repeatedly:
+> - It validates `settings.json` first. If the file is not valid JSON, it changes nothing.
+> - It backs up `settings.json`, and any older copy of the script, before writing.
+> - It leaves every other key and hook untouched.
+> - It replaces an earlier entry for this script instead of adding a duplicate.
 
-To remove the hook entry and the script, run `node install.mjs --uninstall`. Logs are kept.
-
-Claude Code picks up hook changes without a restart.
-
-**CC Switch 3.x users:** switching providers rewrites `settings.json` from the provider config plus the "common config" snippet. Hooks that exist only in `settings.json` are lost on the next switch, so add the same `Stop` block to CC Switch's common config as well. The installer prints a reminder when it finds `~/.cc-switch`.
+> [!WARNING]
+> **CC Switch 3.x users:** switching providers rewrites `settings.json` from the provider config plus the "common config" snippet. A hook that exists only in `settings.json` is lost on the next switch. Add the same `Stop` block to CC Switch's common config as well. The installer prints a reminder when it finds `~/.cc-switch`.
 
 ### Manual install
 
-Copy `cache-keepalive.mjs` somewhere stable and add this next to your existing hooks in `~/.claude/settings.json`, using the absolute path to the script:
+Copy `cache-keepalive.mjs` somewhere stable. Then add this block to `~/.claude/settings.json`, next to your existing hooks:
 
 ```json
 {
@@ -108,7 +117,10 @@ Copy `cache-keepalive.mjs` somewhere stable and add this next to your existing h
 }
 ```
 
-Keep `timeout` at 360 or more; the script gives up on its own after 330 seconds.
+> [!IMPORTANT]
+> - Use the absolute path to the script.
+> - Keep `asyncRewake: true`. Without it the hook cannot wake an idle session.
+> - Keep `timeout` at 360 or more. The script gives up on its own after 330 seconds.
 
 ## Non-Claude models (`--any-model`)
 
@@ -122,11 +134,11 @@ node install.mjs --any-model   # run node install.mjs again without the flag to 
 
 For a manual install, append `"--any-model"` to `args` after the script path. Log lines then include `"anyModel": true`.
 
-Before you turn it on:
-
-- **Timing is tuned for a 5-minute TTL.** The hook fires at 270 s and treats anything older than 300 s as expired. For a provider with a different TTL, adjust `FIRE_AFTER_MS` and `STALE_MS`.
-- **Some providers do not need it.** If their cache does not expire on that schedule, every keepalive is wasted.
-- **Subagents must use a different model.** If a subagent uses the same model name as the main session and `CLAUDE_CODE_SUBAGENT_MODEL` is not set, its requests look like main-session activity. The hook then exits instead of waking the session.
+> [!CAUTION]
+> Check these before you turn it on:
+> - **Timing is tuned for a 5-minute TTL.** The hook fires at 270 s and treats anything older than 300 s as expired. For a provider with a different TTL, adjust `FIRE_AFTER_MS` and `STALE_MS`.
+> - **Some providers do not need it.** If their cache does not expire on that schedule, every keepalive is wasted.
+> - **Subagents must use a different model.** If a subagent uses the same model name as the main session and `CLAUDE_CODE_SUBAGENT_MODEL` is not set, its requests look like main-session activity. The hook then exits instead of waking the session.
 
 ## Logs and state
 

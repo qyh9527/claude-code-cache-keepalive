@@ -63,6 +63,11 @@ hook 配置为 `asyncRewake: true`：它在后台运行，不阻塞 Claude Code�
 
 ## 安装
 
+> [!IMPORTANT]
+> 需要 Node.js 22.13+ 和 Claude Code 2.1.145+。没有任何 npm 依赖。
+
+### 一键安装
+
 ```sh
 git clone https://github.com/qyh9527/claude-code-cache-keepalive.git
 cd claude-code-cache-keepalive
@@ -70,28 +75,32 @@ node install.mjs --dry-run   # 先预览会改什么
 node install.mjs
 ```
 
-安装器会做三件事：
+> [!TIP]
+> 建议先跑 `--dry-run`：它会列出安装器将做的每一处改动，但什么都不写。以后升级时，先 `git pull`，再跑一次 `node install.mjs`。
 
-- 检查 Node 版本；
-- 把 `cache-keepalive.mjs` 复制到 `~/.claude/hooks/`（如果设置了 `CLAUDE_CONFIG_DIR` 就用它，也可以用 `--config-dir <目录>` 指定）；
-- 在 `settings.json` 里加上 `Stop` hook。
+| 命令 | 作用 |
+|---|---|
+| `node install.mjs` | 安装；已安装时就是升级 |
+| `node install.mjs --dry-run` | 只显示将要做的改动，不写任何东西 |
+| `node install.mjs --uninstall` | 移除 hook 条目和脚本，日志保留 |
+| `node install.mjs --any-model` | 安装不限 Claude 的版本，见下方「非 Claude 模型」一节 |
+| `--config-dir <目录>` | 指定别的 Claude 配置目录。默认用 `$CLAUDE_CONFIG_DIR`，没设置时用 `~/.claude` |
 
-可以重复运行，升级时也再跑一次就行。具体保证：
+安装器会把 `cache-keepalive.mjs` 复制到 `<配置目录>/hooks/`，并在 `settings.json` 里加上 `Stop` hook。Claude Code 会自动加载，不需要重启。
 
-- 先校验 `settings.json`，不是合法 JSON 就什么都不改；
-- 写入前先备份 `settings.json`，旧版脚本也会备份；
-- 其他键和其他 hook 原样保留；
-- 已有本脚本的旧条目会被替换，不会重复添加。
+> [!NOTE]
+> 安装器可以放心重复运行：
+> - 先校验 `settings.json`，不是合法 JSON 就什么都不改；
+> - 写入前先备份 `settings.json`，旧版脚本也会备份；
+> - 其他键和其他 hook 原样保留；
+> - 已有本脚本的旧条目会被替换，不会重复添加。
 
-卸载用 `node install.mjs --uninstall`，会移除 hook 条目和脚本，日志保留。
-
-修改 hook 配置后，Claude Code 会自动加载，不需要重启。
-
-**CC Switch 3.x 用户注意：** 切换供应商时，CC Switch 会用"供应商配置 + 通用配置片段"整份重写 `settings.json`。只写在 `settings.json` 里的 hook 下次切换就会丢失，所以要在 CC Switch 的「通用配置」里加上同一段 `Stop` 配置。安装器发现 `~/.cc-switch` 时会提醒你。
+> [!WARNING]
+> **CC Switch 3.x 用户：** 切换供应商时，CC Switch 会用"供应商配置 + 通用配置片段"整份重写 `settings.json`。只写在 `settings.json` 里的 hook，下次切换就会丢失。请在 CC Switch 的「通用配置」里也加上同一段 `Stop` 配置。安装器发现 `~/.cc-switch` 时会提醒你。
 
 ### 手动安装
 
-把 `cache-keepalive.mjs` 放到一个固定位置，然后在 `~/.claude/settings.json` 的 `hooks` 里加入下面这段，和已有的 hook 并列；脚本路径写绝对路径：
+把 `cache-keepalive.mjs` 放到一个固定位置，然后在 `~/.claude/settings.json` 的 `hooks` 里加入下面这段，和已有的 hook 并列：
 
 ```json
 {
@@ -113,7 +122,10 @@ node install.mjs
 }
 ```
 
-`timeout` 至少保持 360；脚本自己会在 330 秒时放弃。
+> [!IMPORTANT]
+> - 脚本路径必须写绝对路径。
+> - `asyncRewake: true` 不能去掉，没有它就无法唤醒空闲的会话。
+> - `timeout` 至少保持 360。脚本自己会在 330 秒时放弃。
 
 ## 非 Claude 模型（`--any-model`）
 
@@ -129,11 +141,11 @@ node install.mjs --any-model   # 想切回默认，不带这个参数再运行�
 
 手动安装时，在 `args` 里脚本路径后面加上 `"--any-model"`。开启后日志里会多一个 `"anyModel": true` 字段。
 
-开启前请注意：
-
-- **时间参数是按 5 分钟 TTL 定的。** hook 在 270 秒时触发，超过 300 秒就视为缓存已过期。供应商的 TTL 不同，就要调整 `FIRE_AFTER_MS` 和 `STALE_MS`。
-- **有的供应商根本不需要保活。** 如果它的缓存不会按这个时间表过期，每次保活都是浪费。
-- **子代理要用不同的模型。** 如果子代理和主会话用同一个模型名，又没有设置 `CLAUDE_CODE_SUBAGENT_MODEL`，子代理的请求会被当成主会话的活动，hook 就会直接退出，不再唤醒会话。
+> [!CAUTION]
+> 开启前先确认这三点：
+> - **时间参数是按 5 分钟 TTL 定的。** hook 在 270 秒时触发，超过 300 秒就视为缓存已过期。供应商的 TTL 不同，就要调整 `FIRE_AFTER_MS` 和 `STALE_MS`。
+> - **有的供应商根本不需要保活。** 如果它的缓存不会按这个时间表过期，每次保活都是浪费。
+> - **子代理要用不同的模型。** 如果子代理和主会话用同一个模型名，又没有设置 `CLAUDE_CODE_SUBAGENT_MODEL`，子代理的请求会被当成主会话的活动，hook 就会直接退出，不再唤醒会话。
 
 ## 日志与状态
 
