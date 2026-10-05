@@ -22,6 +22,14 @@ function mkCase(name) {
   fs.writeFileSync(transcript, JSON.stringify({ type: 'assistant', timestamp: iso(Date.now() - 60000) }) + '\n');
   return { dir, state: path.join(dir, 'state'), transcript, db: path.join(dir, 'mini.db') };
 }
+// 带主会话模型信息的 transcript：主会话 assistant 的 message.model 是 claude-opus-5-5，
+// 之后还有一条 sidechain（子代理）assistant 用 sonnet，读主模型时必须跳过它
+function mainTranscript(c) {
+  fs.writeFileSync(c.transcript, [
+    { type: 'assistant', isSidechain: false, message: { model: 'claude-opus-5-5' }, timestamp: iso(Date.now() - 60000) },
+    { type: 'assistant', isSidechain: true, message: { model: 'claude-sonnet-5-5' }, timestamp: iso(Date.now() - 50000) },
+  ].map((o) => JSON.stringify(o) + '\n').join(''));
+}
 function dbInit(file) {
   const db = new DatabaseSync(file);
   db.exec('create table if not exists proxy_request_logs (session_id text, model text, request_model text, status_code integer, created_at integer, latency_ms integer)');
@@ -264,6 +272,80 @@ const cases = {
     const c = mkCase('T32'); dbAdd(c.db, [{ session: 's32', startAgoMs: 2000, request_model: 'claude-haiku-4-5', model: 'claude-haiku-4-5' }]);
     const r = await run(c, inp(c, 's32', [SUB]), { CACHE_KEEPALIVE_FIRE_AFTER_S: '35' }, ['--any-model']);
     check('--any-model 仍排除 haiku 旁路请求', isWake(r) && r.last.anchorSource === 'fallback', brief(r));
+  },
+  async T33() {
+    const c = mkCase('T33'); dbAdd(c.db, [{ session: 's33', startAgoMs: 2000 }]);
+    const p = run(c, inp(c, 's33', [SUB]), { CACHE_KEEPALIVE_FIRE_AFTER_S: '8' });
+    await sleep(3500);
+    const now = () => iso(Date.now());
+    fs.appendFileSync(c.transcript, [
+      { type: 'queue-operation', operation: 'enqueue', timestamp: now() },
+      { type: 'queue-operation', operation: 'remove', timestamp: now() },
+      { type: 'attachment', timestamp: now() },
+      { type: 'system', subtype: 'stop_hook_summary', timestamp: now() },
+      { type: 'pr-link', timestamp: now() },
+    ].map((o) => JSON.stringify(o) + '\n').join(''));
+    const r = await p;
+    check('transcript 只多了 queue-operation/attachment/system 等非对话条目→不算活动，wake', isWake(r), brief(r));
+  },
+  async T34() {
+    const out = [];
+    for (const [name, entry, expect] of [
+      ['sidechain', { type: 'user', isSidechain: true }, 'wake'],
+      ['main', { type: 'user', isSidechain: false }, 'activity-transcript'],
+      ['main-assistant', { type: 'assistant' }, 'activity-transcript'],
+    ]) {
+      const c = mkCase('T34-' + name); dbAdd(c.db, [{ session: 's34', startAgoMs: 2000 }]);
+      const p = run(c, inp(c, 's34', [SUB]), { CACHE_KEEPALIVE_FIRE_AFTER_S: '8' });
+      await sleep(3500); fs.appendFileSync(c.transcript, JSON.stringify({ ...entry, timestamp: iso(Date.now()) }) + '\n');
+      const r = await p;
+      out.push(expect === 'wake' ? isWake(r) : isExit(r, expect), brief(r));
+    }
+    check('新 user/assistant 条目：isSidechain=true 忽略→wake；非 sidechain→activity-transcript', out[0] && out[2] && out[4], out.filter((_, i) => i % 2).join(' | '));
+  },
+  async T35() {
+    const c = mkCase('T35'); mainTranscript(c);
+    dbAdd(c.db, [
+      { session: 's35', startAgoMs: 4000 },
+      { session: 's35', startAgoMs: 500, request_model: 'claude-sonnet-5', model: 'claude-sonnet-5-5' },
+    ]);
+    const r = await run(c, inp(c, 's35', [SUB]), { CACHE_KEEPALIVE_FIRE_AFTER_S: '9' });
+    check('主会话模型已知：锚点取主模型行而非更新的 sonnet 行', isWake(r) && r.last.mainModel === 'claude-opus-5-5' && r.last.upstreamModel === 'claude-opus-5-5' && r.secs < 7.5, brief(r) + ` main=${r.last?.mainModel} up=${r.last?.upstreamModel}`);
+  },
+  async T36() {
+    const c = mkCase('T36'); mainTranscript(c); dbAdd(c.db, [{ session: 's36', startAgoMs: 2000 }]);
+    const p = run(c, inp(c, 's36', [SUB]), { CACHE_KEEPALIVE_FIRE_AFTER_S: '8' });
+    await sleep(3000); dbAdd(c.db, [{ session: 's36', startAgoMs: 500, request_model: 'claude-sonnet-5', model: 'claude-sonnet-5-5' }]);
+    const r = await p;
+    check('主会话模型已知：Stop 后只有 sonnet 子代理请求→不判 activity-ccswitch，wake', isWake(r) && r.last.upstreamModel === 'claude-opus-5-5', brief(r));
+  },
+  async T37() {
+    const c = mkCase('T37'); dbAdd(c.db, [{ session: 's37', startAgoMs: 2000 }]);
+    const p = run(c, inp(c, 's37', [SUB]), { CACHE_KEEPALIVE_FIRE_AFTER_S: '8' });
+    await sleep(3000); dbAdd(c.db, [{ session: 's37', startAgoMs: 500, request_model: 'claude-sonnet-5', model: 'claude-sonnet-5-5' }]);
+    const r = await p;
+    check('transcript 无 assistant 模型信息→不过滤（旧行为），sonnet 请求算活动', isExit(r, 'activity-ccswitch') && r.last.mainModel === null, brief(r));
+  },
+  async T38() {
+    const c = mkCase('T38');
+    dbAdd(c.db, [
+      { session: 's38', startAgoMs: 4000 },
+      { session: 's38', startAgoMs: 500, request_model: 'claude-sonnet-5', model: 'claude-sonnet-5-5' },
+    ]);
+    const r = await run(c, inp(c, 's38', [SUB]), { CACHE_KEEPALIVE_FIRE_AFTER_S: '6' });
+    check('transcript 无 assistant 模型信息→锚点仍取最新一行（旧行为）', isWake(r) && r.last.mainModel === null && r.last.upstreamModel === 'claude-sonnet-5-5', brief(r) + ` up=${r.last?.upstreamModel}`);
+  },
+  async T39() {
+    const c = mkCase('T39');
+    // 最后一条 assistant 是 <synthetic> 或 sidechain，都不能当主模型；更早的主会话 assistant 才是
+    fs.writeFileSync(c.transcript, [
+      { type: 'assistant', isSidechain: false, message: { model: 'claude-opus-5-5' }, timestamp: iso(Date.now() - 90000) },
+      { type: 'assistant', isSidechain: true, message: { model: 'claude-sonnet-5-5' }, timestamp: iso(Date.now() - 70000) },
+      { type: 'assistant', message: { model: '<synthetic>' }, timestamp: iso(Date.now() - 60000) },
+    ].map((o) => JSON.stringify(o) + '\n').join(''));
+    dbAdd(c.db, [{ session: 's39', startAgoMs: 2000 }]);
+    const r = await run(c, inp(c, 's39', [SUB]), { CACHE_KEEPALIVE_FIRE_AFTER_S: '6' });
+    check('主模型读取跳过 sidechain 与 <synthetic> 条目', isWake(r) && r.last.mainModel === 'claude-opus-5-5', brief(r) + ` main=${r.last?.mainModel}`);
   },
 };
 

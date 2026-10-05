@@ -9,6 +9,8 @@
 //   CACHE_KEEPALIVE_DIR（状态与日志目录）/ CACHE_KEEPALIVE_DB（cc-switch 库路径）
 //   CACHE_KEEPALIVE_SETTLE_S / CACHE_KEEPALIVE_FIRE_AFTER_S
 // 子代理模型可用 CLAUDE_CODE_SUBAGENT_MODEL 排除，避免它的请求被当成主会话请求。
+// 按次指定的子代理模型（Agent 调用里的 model 参数）靠 transcript 里主会话最后一条 assistant 的
+// message.model 过滤库里的 model 列；已知限制：子代理与主会话同模型时无法区分。
 //
 // 命令行参数：
 //   --any-model  不限 Claude 系列：主会话请求不再要求模型名像 Claude，上游是任何模型都保活。
@@ -150,7 +152,8 @@ function deleteFile(p) {
 // 不能当锚点。判断「会话是否恢复活动」时则用 okOnly=false，任何状态的请求都算活动。
 let sqliteModule = null;
 // 返回 { start, model } 或 null；model 是上游真实模型名（CC Switch 切到非 Claude 供应商时会变）
-async function queryLatestRow(sessionId, { okOnly = false } = {}) {
+// mainModel（可选）：主会话模型，非空时只取上游模型 model 列与它相等的行，排除按次指定模型的子代理请求。
+async function queryLatestRow(sessionId, { okOnly = false, mainModel = null } = {}) {
   let db = null;
   try {
     if (sqliteModule === null) sqliteModule = await import('node:sqlite');
@@ -167,6 +170,10 @@ async function queryLatestRow(sessionId, { okOnly = false } = {}) {
     if (SUBAGENT_MODEL) {
       sql += 'and request_model <> ? ';
       params.push(SUBAGENT_MODEL);
+    }
+    if (mainModel) {
+      sql += 'and model = ? ';
+      params.push(mainModel);
     }
     if (okOnly) sql += 'and status_code = 200 ';
     sql += 'order by (created_at*1000 - coalesce(latency_ms,0)) desc limit 1';
@@ -212,18 +219,15 @@ function parseTsMs(t) {
   return null;
 }
 
-// 返回 'idle' | 'active' | 'unreadable'
-function checkTranscript(p, snap, hookStart) {
-  const cur = snapshotFile(p);
-  if (cur === null) return 'unreadable';
-  if (cur.mtimeMs === snap.mtimeMs && cur.size === snap.size) return 'idle';
+// 读 transcript 最后 TRANSCRIPT_TAIL_BYTES，返回按行切好的数组；读不了返回 null
+function readTranscriptTail(p, size) {
   let text;
   let start = 0;
   try {
     const fd = fs.openSync(p, 'r');
     try {
-      start = Math.max(0, cur.size - TRANSCRIPT_TAIL_BYTES);
-      const len = Math.max(0, cur.size - start);
+      start = Math.max(0, size - TRANSCRIPT_TAIL_BYTES);
+      const len = Math.max(0, size - start);
       const buf = Buffer.alloc(len);
       const n = len > 0 ? fs.readSync(fd, buf, 0, len, start) : 0;
       text = buf.subarray(0, n).toString('utf8');
@@ -231,17 +235,55 @@ function checkTranscript(p, snap, hookStart) {
       try { fs.closeSync(fd); } catch { /* ignore */ }
     }
   } catch {
-    return 'unreadable';
+    return null;
   }
   const lines = text.split('\n');
   if (start > 0) lines.shift(); // 从中间开始读时，第一行可能被截断
+  return lines;
+}
+
+function parseJsonLine(line) {
+  const s = line.trim();
+  if (!s) return null;
+  try {
+    const o = JSON.parse(s);
+    return o && typeof o === 'object' ? o : null;
+  } catch {
+    return null;
+  }
+}
+
+// 只有主会话自己的 user / assistant 条目才代表「会话开了新一轮」。queue-operation（后台任务通知
+// 入队又立刻移除）、attachment、system、pr-link 等都不是；子代理（isSidechain）的条目也不是。
+const isMainTurnEntry = (o) => (o.type === 'user' || o.type === 'assistant') && o.isSidechain !== true;
+
+// 主会话模型：transcript 尾部最后一条主会话 assistant 的 message.model；取不到返回 null。
+// 跳过 Claude Code 自己合成的 "<synthetic>" 占位模型。
+function readMainModel(p) {
+  const cur = snapshotFile(p);
+  if (cur === null) return null;
+  const lines = readTranscriptTail(p, cur.size);
+  if (lines === null) return null;
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const o = parseJsonLine(lines[i]);
+    if (!o || o.type !== 'assistant' || o.isSidechain === true) continue;
+    const m = o.message && typeof o.message === 'object' ? o.message.model : null;
+    if (typeof m === 'string' && m.trim() && !m.startsWith('<')) return m.trim();
+  }
+  return null;
+}
+
+// 返回 'idle' | 'active' | 'unreadable'
+function checkTranscript(p, snap, hookStart) {
+  const cur = snapshotFile(p);
+  if (cur === null) return 'unreadable';
+  if (cur.mtimeMs === snap.mtimeMs && cur.size === snap.size) return 'idle';
+  const lines = readTranscriptTail(p, cur.size);
+  if (lines === null) return 'unreadable';
   const threshold = hookStart + TRANSCRIPT_LAG_MS;
   for (const line of lines) {
-    const s = line.trim();
-    if (!s) continue;
-    let o = null;
-    try { o = JSON.parse(s); } catch { continue; }
-    if (!o || typeof o !== 'object') continue;
+    const o = parseJsonLine(line);
+    if (!o || !isMainTurnEntry(o)) continue;
     const ms = parseTsMs(o.timestamp);
     if (ms !== null && ms > threshold) return 'active';
   }
@@ -395,6 +437,7 @@ async function main() {
     anchorSource: null,
     anchorAgeS: null,
     upstreamModel: null,
+    mainModel: null,
     wakes,
     periodAgeS: null,
     late: false,
@@ -417,10 +460,13 @@ async function main() {
   }
 
   // 4. 锚点（只认成功的主会话请求）
+  // 主会话模型 Stop 时读一次：最后一轮主回复此刻已写入 transcript
+  const mainModel = readMainModel(transcriptPath);
+  ctx.mainModel = mainModel;
   let anchor;
   let anchorSource;
   let anchorModel = null;
-  const a0 = await queryLatestRow(session, { okOnly: true });
+  const a0 = await queryLatestRow(session, { okOnly: true, mainModel });
   if (a0 !== null) {
     anchor = a0.start;
     anchorModel = a0.model;
@@ -437,7 +483,7 @@ async function main() {
     setTimeout(() => { throw new Error('test-throw-async'); }, 5);
     await sleep(50);
   }
-  const a1 = await queryLatestRow(session, { okOnly: true });
+  const a1 = await queryLatestRow(session, { okOnly: true, mainModel });
   if (a1 !== null && (anchorSource === 'fallback' || a1.start > anchor)) {
     anchor = a1.start;
     anchorModel = a1.model;
@@ -495,12 +541,12 @@ async function main() {
     }
 
     // c. 库里有新请求：先看「任何状态」（失败请求也算活动），再单独看成功请求是否推进锚点
-    const anyRow = await queryLatestRow(session, { okOnly: false });
+    const anyRow = await queryLatestRow(session, { okOnly: false, mainModel });
     if (anyRow !== null && anyRow.start > hookStart) {
       log({ ...stamp(), decision: 'exit', reason: 'activity-ccswitch', anchorSource, anchorAgeS: secs(Date.now() - anchor) });
       return 0;
     }
-    const okRow = await queryLatestRow(session, { okOnly: true });
+    const okRow = await queryLatestRow(session, { okOnly: true, mainModel });
     // 兜底锚点只是估算：查到真实成功请求就无条件采用；已有真实锚点时只接受更晚的请求
     if (okRow !== null && (anchorSource === 'fallback' || okRow.start > anchor)) {
       anchor = okRow.start; // Stop 前发出、晚写入库的成功请求：锚点前移，重新计时
