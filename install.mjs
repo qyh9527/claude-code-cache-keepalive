@@ -4,6 +4,7 @@
 //   node install.mjs               安装或升级
 //   node install.mjs --dry-run     只显示将要做的改动
 //   node install.mjs --uninstall   移除 hook 配置和脚本（保留日志）
+//   node install.mjs --any-model   安装不限 Claude 系列的版本（上游是任何模型都保活）
 //   node install.mjs --config-dir <dir>   指定 Claude 配置目录（默认 $CLAUDE_CONFIG_DIR 或 ~/.claude）
 
 import fs from 'node:fs';
@@ -18,6 +19,7 @@ const MIN_NODE = [22, 13];
 const args = process.argv.slice(2);
 const dryRun = args.includes('--dry-run');
 const uninstall = args.includes('--uninstall');
+const anyModel = args.includes('--any-model');
 const dirFlag = args.indexOf('--config-dir');
 const configDir = path.resolve(
   dirFlag >= 0 && args[dirFlag + 1]
@@ -139,7 +141,7 @@ removeOurHandlers(settings);
 settings.hooks ??= {};
 settings.hooks.Stop ??= [];
 settings.hooks.Stop.push({
-  hooks: [{ type: 'command', command: 'node', args: [targetScript], asyncRewake: true, timeout: HOOK_TIMEOUT }],
+  hooks: [{ type: 'command', command: 'node', args: [targetScript, ...(anyModel ? ['--any-model'] : [])], asyncRewake: true, timeout: HOOK_TIMEOUT }],
 });
 if (JSON.stringify(settings) === before) {
   say('• settings.json: Stop hook already configured');

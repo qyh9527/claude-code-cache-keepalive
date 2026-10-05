@@ -19,7 +19,7 @@ On every `Stop`:
    - the transcript has gained an entry timestamped after the hook started, for example a user message or a task-completion notification;
    - the proxy log shows a new main-session request;
    - the cache has already expired (anchor older than 300 s);
-   - the real upstream model is not Claude (for example, the proxy routes `claude-*` names to another provider);
+   - the real upstream model is not Claude (for example, the proxy routes `claude-*` names to another provider), unless `--any-model` is set;
    - the idle period has reached its cap.
 4. **Wake the session.** Otherwise it writes one line to stderr asking the model to reply only `保活` ("keep alive"), without calling any tools, and exits with code 2. That short turn reads the whole cached prefix and appends only a few tokens.
 
@@ -110,6 +110,24 @@ Copy `cache-keepalive.mjs` somewhere stable and add this next to your existing h
 
 Keep `timeout` at 360 or more; the script gives up on its own after 330 seconds.
 
+## Non-Claude models (`--any-model`)
+
+By default the hook only acts for Claude: it anchors on requests whose model name looks like Claude (`claude`, `opus`, `sonnet`, `fable`), and it stays quiet when the upstream model in the proxy log is something else.
+
+The `--any-model` flag drops both checks, so the hook keeps any upstream warm. Haiku side requests and `CLAUDE_CODE_SUBAGENT_MODEL` are still excluded. Use it when your main model sits behind a provider whose prompt cache also expires after a few minutes of idle time.
+
+```sh
+node install.mjs --any-model   # run node install.mjs again without the flag to switch back
+```
+
+For a manual install, append `"--any-model"` to `args` after the script path. Log lines then include `"anyModel": true`.
+
+Before you turn it on:
+
+- **Timing is tuned for a 5-minute TTL.** The hook fires at 270 s and treats anything older than 300 s as expired. For a provider with a different TTL, adjust `FIRE_AFTER_MS` and `STALE_MS`.
+- **Some providers do not need it.** If their cache does not expire on that schedule, every keepalive is wasted.
+- **Subagents must use a different model.** If a subagent uses the same model name as the main session and `CLAUDE_CODE_SUBAGENT_MODEL` is not set, its requests look like main-session activity. The hook then exits instead of waking the session.
+
 ## Logs and state
 
 Files go to `<os temp dir>/cache-keepalive/`:
@@ -154,8 +172,8 @@ These environment variables exist for tests:
 ## Tests
 
 ```sh
-node test/run.mjs            # the hook: 28 scenarios in parallel, about 8 seconds
-node test/install.test.mjs   # the installer: 7 scenarios
+node test/run.mjs            # the hook: 31 scenarios in parallel, about 9 seconds
+node test/install.test.mjs   # the installer: 8 scenarios
 ```
 
 Every scenario uses its own temp directory, so your real `~/.claude`, logs, and proxy database are never touched. Each hook scenario also gets its own transcript and a small SQLite database.

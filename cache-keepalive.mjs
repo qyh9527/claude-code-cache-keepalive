@@ -10,6 +10,10 @@
 //   CACHE_KEEPALIVE_SETTLE_S / CACHE_KEEPALIVE_FIRE_AFTER_S
 // 子代理模型可用 CLAUDE_CODE_SUBAGENT_MODEL 排除，避免它的请求被当成主会话请求。
 //
+// 命令行参数：
+//   --any-model  不限 Claude 系列：主会话请求不再要求模型名像 Claude，上游是任何模型都保活。
+//                适合其他也有短 TTL prompt cache 的上游；默认只对 Claude 生效。
+//
 // 只用 Node 内置模块。node:sqlite 会发出 ExperimentalWarning，而 exit 2 时 stderr
 // 会原样交给模型，所以先摘掉 warning 监听再动态 import。
 
@@ -69,6 +73,7 @@ const DOCKER_DETACH_RE = /(^|\s)-d(\s|$)|--detach\b/i;
 const SUBAGENT_MODEL = typeof process.env.CLAUDE_CODE_SUBAGENT_MODEL === 'string'
   ? process.env.CLAUDE_CODE_SUBAGENT_MODEL.trim()
   : '';
+const ANY_MODEL = process.argv.slice(2).includes('--any-model');
 
 const wakeMessage = (n) =>
   `[cache-keepalive] 后台任务仍在运行，这是自动缓存保活唤醒（第 ${n} 次）。` +
@@ -140,7 +145,7 @@ function deleteFile(p) {
 
 // —— CC Switch 请求起点：每次查询开一个只读连接，查完立刻 close ——
 // 过滤主会话请求：request_model 含 claude/opus/sonnet/fable（兼容 CC/claude-… 这类带前缀的名字）
-// 且不是 haiku 旁路；若知道子代理模型名，再排掉它。
+// 且不是 haiku 旁路；若知道子代理模型名，再排掉它。--any-model 时不要求模型名像 Claude。
 // okOnly=true 只取 status_code=200 的成功请求：502 等失败请求没到上游，不会刷新缓存，
 // 不能当锚点。判断「会话是否恢复活动」时则用 okOnly=false，任何状态的请求都算活动。
 let sqliteModule = null;
@@ -153,9 +158,11 @@ async function queryLatestRow(sessionId, { okOnly = false } = {}) {
     let sql =
       'select created_at, latency_ms, model from proxy_request_logs ' +
       'where session_id = ? ' +
-      "and (request_model like '%claude%' or request_model like '%opus%' " +
-      "or request_model like '%sonnet%' or request_model like '%fable%') " +
-      "and request_model not like '%haiku%' ";
+      (ANY_MODEL
+        ? ''
+        : "and (request_model like '%claude%' or request_model like '%opus%' " +
+          "or request_model like '%sonnet%' or request_model like '%fable%') ") +
+      "and coalesce(request_model, '') not like '%haiku%' ";
     const params = [sessionId];
     if (SUBAGENT_MODEL) {
       sql += 'and request_model <> ? ';
@@ -182,6 +189,7 @@ async function queryLatestRow(sessionId, { okOnly = false } = {}) {
 // 上游不是 Claude（例如切到 DeepSeek）就没有 5 分钟缓存问题，保活是白花钱。
 const CLAUDE_MODEL_RE = /claude|opus|sonnet|fable/i;
 const looksClaudeModel = (m) => typeof m === 'string' && CLAUDE_MODEL_RE.test(m);
+const upstreamAllowed = (m) => ANY_MODEL || looksClaudeModel(m);
 
 // —— transcript 活动检测 ——
 // 只看 mtime/size 变化不够，Stop 自己也会写 assistant + system/stop_hook_summary（时间戳
@@ -390,6 +398,7 @@ async function main() {
     wakes,
     periodAgeS: null,
     late: false,
+    ...(ANY_MODEL ? { anyModel: true } : {}),
   };
   const stamp = () => ({ ts: nowIso(), ...ctx });
 
@@ -438,7 +447,7 @@ async function main() {
     ctx.anchorSource = anchorSource;
     ctx.upstreamModel = anchorModel;
     ctx.anchorAgeS = secs(Date.now() - anchor);
-    if (!looksClaudeModel(anchorModel)) {
+    if (!upstreamAllowed(anchorModel)) {
       log({ ...stamp(), decision: 'exit', reason: 'non-claude-model' });
       return 0;
     }
@@ -500,7 +509,7 @@ async function main() {
       ctx.anchorSource = anchorSource;
       ctx.upstreamModel = anchorModel;
       ctx.anchorAgeS = secs(Date.now() - anchor);
-      if (!looksClaudeModel(anchorModel)) { // 新的一行也要确认上游仍是 Claude
+      if (!upstreamAllowed(anchorModel)) { // 新的一行也要确认上游仍是 Claude（--any-model 时不限）
         log({ ...stamp(), decision: 'exit', reason: 'non-claude-model' });
         return 0;
       }

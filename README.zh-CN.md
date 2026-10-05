@@ -24,7 +24,7 @@ hook 配置为 `asyncRewake: true`：它在后台运行，不阻塞 Claude Code�
    - transcript 出现了时间戳晚于 hook 启动的条目，例如用户消息或任务完成通知；
    - 请求日志里出现了新的主会话请求；
    - 锚点已超过 300 秒，缓存已经过期；
-   - 上游实际模型不是 Claude，比如代理把 `claude-*` 转发到了别家；
+   - 上游实际模型不是 Claude，比如代理把 `claude-*` 转发到了别家（设置了 `--any-model` 时不检查这一条）；
    - 本空闲期已经到达上限。
 4. **唤醒会话。** 以上条件都不成立时，往 stderr 写一句话，要求模型只回复"保活"、不调用任何工具，然后以 exit 2 退出。这一轮会读取整段缓存前缀，只追加几个 token。
 
@@ -115,6 +115,26 @@ node install.mjs
 
 `timeout` 至少保持 360；脚本自己会在 330 秒时放弃。
 
+## 非 Claude 模型（`--any-model`）
+
+默认只对 Claude 生效，具体有两条检查：
+- 锚点只取模型名像 Claude 的请求（含 `claude`、`opus`、`sonnet`、`fable`）；
+- 代理日志显示上游实际是别的模型时，hook 不唤醒。
+
+加上 `--any-model` 后这两条都不再检查，上游是任何模型都保活。haiku 旁路请求和 `CLAUDE_CODE_SUBAGENT_MODEL` 仍然会被排除。如果你的主模型所在的供应商，prompt cache 也会在空闲几分钟后过期，就用这个参数。
+
+```sh
+node install.mjs --any-model   # 想切回默认，不带这个参数再运行一次 node install.mjs
+```
+
+手动安装时，在 `args` 里脚本路径后面加上 `"--any-model"`。开启后日志里会多一个 `"anyModel": true` 字段。
+
+开启前请注意：
+
+- **时间参数是按 5 分钟 TTL 定的。** hook 在 270 秒时触发，超过 300 秒就视为缓存已过期。供应商的 TTL 不同，就要调整 `FIRE_AFTER_MS` 和 `STALE_MS`。
+- **有的供应商根本不需要保活。** 如果它的缓存不会按这个时间表过期，每次保活都是浪费。
+- **子代理要用不同的模型。** 如果子代理和主会话用同一个模型名，又没有设置 `CLAUDE_CODE_SUBAGENT_MODEL`，子代理的请求会被当成主会话的活动，hook 就会直接退出，不再唤醒会话。
+
 ## 日志与状态
 
 文件都放在 `<系统临时目录>/cache-keepalive/`：
@@ -159,8 +179,8 @@ node install.mjs
 ## 测试
 
 ```sh
-node test/run.mjs            # hook 本身：并行跑 28 个场景，约 8 秒
-node test/install.test.mjs   # 安装器：7 个场景
+node test/run.mjs            # hook 本身：并行跑 31 个场景，约 9 秒
+node test/install.test.mjs   # 安装器：8 个场景
 ```
 
 每个场景都用独立的临时目录，不会碰真实的 `~/.claude`、日志和代理数据库。hook 的每个场景还各有自己的 transcript 和迷你 SQLite 库。

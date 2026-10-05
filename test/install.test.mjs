@@ -87,6 +87,16 @@ const backups = (dir) => fs.readdirSync(dir).filter((f) => f.startsWith('setting
   check('dry run 不落盘', r.code === 0 && !fs.existsSync(path.join(d, 'settings.json')) && !fs.existsSync(path.join(d, 'hooks')));
 }
 
+// 8. --any-model：写入参数；再不带参数运行就切回默认，且始终只有一条
+{
+  const d = path.join(ROOT, 'anymodel');
+  run(d, '--any-model');
+  const a = ourHandlers(settingsOf(d));
+  run(d);
+  const b = ourHandlers(settingsOf(d));
+  check('--any-model 切换', a.length === 1 && a[0].args.includes('--any-model') && b.length === 1 && !b[0].args.includes('--any-model'));
+}
+
 fs.rmSync(ROOT, { recursive: true, force: true });
 const fail = results.filter((r) => !r.ok);
 console.log(`## ${results.length - fail.length}/${results.length} passed`);

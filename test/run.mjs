@@ -39,10 +39,10 @@ function dbAdd(file, rows) {
   }
   db.close();
 }
-function run(c, input, env = {}) {
+function run(c, input, env = {}, extraArgs = []) {
   return new Promise((resolve) => {
     const t0 = Date.now();
-    const p = spawn(process.execPath, [SCRIPT], {
+    const p = spawn(process.execPath, [SCRIPT, ...extraArgs], {
       env: { ...process.env, CLAUDE_CODE_SUBAGENT_MODEL: '', CACHE_KEEPALIVE_DIR: c.state, CACHE_KEEPALIVE_DB: c.db, CACHE_KEEPALIVE_SETTLE_S: '1', ...env },
     });
     let err = '';
@@ -245,6 +245,25 @@ const cases = {
     await sleep(3500); fs.writeFileSync(c.transcript, JSON.stringify({ type: 'user', timestamp: iso(Date.now()) }) + '\n');
     const r = await p;
     check('O2 小文件被改写成只剩一行新条目→activity-transcript', isExit(r, 'activity-transcript'), brief(r));
+  },
+  async T30() {
+    const c = mkCase('T30'); dbAdd(c.db, [{ session: 's30', startAgoMs: 2000, model: 'deepseek/deepseek-v4.1-flash' }]);
+    const r = await run(c, inp(c, 's30', [SUB]), { CACHE_KEEPALIVE_FIRE_AFTER_S: '6' }, ['--any-model']);
+    check('--any-model：上游是 deepseek 也唤醒', isWake(r) && r.last.anyModel === true && /deepseek/.test(r.last.upstreamModel), brief(r));
+  },
+  async T31() {
+    const out = [];
+    for (const flag of [['--any-model'], []]) {
+      const c = mkCase('T31' + flag.length); dbAdd(c.db, [{ session: 's31', startAgoMs: 2000, model: 'gpt-5', request_model: 'gpt-5' }]);
+      const r = await run(c, inp(c, 's31', [SUB]), { CACHE_KEEPALIVE_FIRE_AFTER_S: flag.length ? '6' : '35' }, flag);
+      out.push(r);
+    }
+    check('--any-model：非 Claude 请求名也能当锚点；默认模式忽略它、走兜底', isWake(out[0]) && out[0].last.anchorSource === 'ccswitch' && isWake(out[1]) && out[1].last.anchorSource === 'fallback', `${brief(out[0])} | ${brief(out[1])}`);
+  },
+  async T32() {
+    const c = mkCase('T32'); dbAdd(c.db, [{ session: 's32', startAgoMs: 2000, request_model: 'claude-haiku-4-5', model: 'claude-haiku-4-5' }]);
+    const r = await run(c, inp(c, 's32', [SUB]), { CACHE_KEEPALIVE_FIRE_AFTER_S: '35' }, ['--any-model']);
+    check('--any-model 仍排除 haiku 旁路请求', isWake(r) && r.last.anchorSource === 'fallback', brief(r));
   },
 };
 
