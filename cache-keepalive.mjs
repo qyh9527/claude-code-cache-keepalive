@@ -219,10 +219,11 @@ function parseTsMs(t) {
   return null;
 }
 
-// 读 transcript 最后 TRANSCRIPT_TAIL_BYTES，返回按行切好的数组；读不了返回 null
+// 读取有界尾部，返回完整 JSONL 行与首个被覆盖的字节位置；读不了返回 null。
 function readTranscriptTail(p, size) {
   let text;
   let start = 0;
+  let firstByte = 0;
   try {
     const fd = fs.openSync(p, 'r');
     try {
@@ -230,16 +231,24 @@ function readTranscriptTail(p, size) {
       const len = Math.max(0, size - start);
       const buf = Buffer.alloc(len);
       const n = len > 0 ? fs.readSync(fd, buf, 0, len, start) : 0;
-      text = buf.subarray(0, n).toString('utf8');
+      let offset = 0;
+      if (start > 0) {
+        const previous = Buffer.alloc(1);
+        fs.readSync(fd, previous, 0, 1, start - 1);
+        if (previous[0] !== 10) {
+          const newline = buf.subarray(0, n).indexOf(10);
+          offset = newline < 0 ? n : newline + 1;
+        }
+      }
+      firstByte = start + offset;
+      text = buf.subarray(offset, n).toString('utf8');
     } finally {
       try { fs.closeSync(fd); } catch { /* ignore */ }
     }
   } catch {
     return null;
   }
-  const lines = text.split('\n');
-  if (start > 0) lines.shift(); // 从中间开始读时，第一行可能被截断
-  return lines;
+  return { lines: text.split('\n'), firstByte };
 }
 
 function parseJsonLine(line) {
@@ -262,8 +271,9 @@ const isMainTurnEntry = (o) => (o.type === 'user' || o.type === 'assistant') && 
 function readMainModel(p) {
   const cur = snapshotFile(p);
   if (cur === null) return null;
-  const lines = readTranscriptTail(p, cur.size);
-  if (lines === null) return null;
+  const tail = readTranscriptTail(p, cur.size);
+  if (tail === null) return null;
+  const { lines } = tail;
   for (let i = lines.length - 1; i >= 0; i--) {
     const o = parseJsonLine(lines[i]);
     if (!o || o.type !== 'assistant' || o.isSidechain === true) continue;
@@ -278,15 +288,17 @@ function checkTranscript(p, snap, hookStart) {
   const cur = snapshotFile(p);
   if (cur === null) return 'unreadable';
   if (cur.mtimeMs === snap.mtimeMs && cur.size === snap.size) return 'idle';
-  const lines = readTranscriptTail(p, cur.size);
-  if (lines === null) return 'unreadable';
-  for (const line of lines) {
+  const tail = readTranscriptTail(p, cur.size);
+  if (tail === null) return 'unreadable';
+  for (const line of tail.lines) {
     const o = parseJsonLine(line);
     if (!o || !isMainTurnEntry(o)) continue;
     const ms = parseTsMs(o.timestamp);
     if (ms === null) continue;
     if (o.type === 'user' ? ms >= hookStart : ms > hookStart + TRANSCRIPT_LAG_MS) return 'active';
   }
+  // 新增区间有字节落在读取窗口外，或文件被改写而无法覆盖全量：不能安全断言空闲。
+  if (tail.firstByte > snap.size || (cur.size <= snap.size && tail.firstByte > 0)) return 'unreadable';
   return 'idle';
 }
 

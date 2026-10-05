@@ -377,6 +377,44 @@ const cases = {
     const r = await p;
     check('T41 迟到的本轮 Stop assistant 仍保留宽限', isWake(r), brief(r));
   },
+  async T42() {
+    await Promise.all([262144, 300000].map(async (bytes) => {
+      const c = mkCase('T42-' + bytes);
+      const p = run(c, inp(c, 's42', [SUB]), { CACHE_KEEPALIVE_SETTLE_S: '0', CACHE_KEEPALIVE_FIRE_AFTER_S: '36' });
+      await waitForState(c, 's42');
+      await sleep(3000);
+      const entry = { type: 'user', timestamp: iso(Date.now()), message: { role: 'user', content: '' } };
+      entry.message.content = 'x'.repeat(bytes - Buffer.byteLength(JSON.stringify(entry) + '\n'));
+      fs.appendFileSync(c.transcript, JSON.stringify(entry) + '\n');
+      const r = await p;
+      const expected = bytes === 262144 ? 'activity-transcript' : 'transcript-unreadable';
+      check(`T42 新 user 条目 ${bytes} 字节不误唤醒`, isExit(r, expected), brief(r));
+    }));
+  },
+  async T43() {
+    await Promise.all([false, true].map(async (oldLarge) => {
+      const c = mkCase('T43-' + oldLarge);
+      if (oldLarge) {
+        fs.writeFileSync(c.transcript, JSON.stringify({ type: 'assistant', timestamp: iso(Date.now() - 60000), message: { content: 'x'.repeat(300000) } }) + '\n');
+      }
+      const p = run(c, inp(c, 's43', [SUB]), { CACHE_KEEPALIVE_SETTLE_S: '0', CACHE_KEEPALIVE_FIRE_AFTER_S: '36' });
+      await waitForState(c, 's43');
+      await sleep(3000);
+      if (!oldLarge) fs.appendFileSync(c.transcript, JSON.stringify({ type: 'user', timestamp: iso(Date.now()) }) + '\n');
+      fs.appendFileSync(c.transcript, JSON.stringify({ type: 'queue-operation', timestamp: iso(Date.now()), data: oldLarge ? 'ok' : 'x'.repeat(300000) }) + '\n');
+      const r = await p;
+      check(oldLarge ? 'T43 截断仅影响旧条目，新增区间可完整判断→wake' : 'T43 新 user 被后续大条目挤出窗口→保守退出', oldLarge ? isWake(r) : isExit(r, 'transcript-unreadable'), brief(r));
+    }));
+  },
+  async T44() {
+    const c = mkCase('T44');
+    const p = run(c, inp(c, 's44', [SUB]), { CACHE_KEEPALIVE_SETTLE_S: '0', CACHE_KEEPALIVE_FIRE_AFTER_S: '36' });
+    await waitForState(c, 's44');
+    await sleep(3000);
+    fs.writeFileSync(c.transcript, JSON.stringify({ type: 'user', timestamp: iso(Date.now()), message: { content: 'x'.repeat(300000) } }) + '\n');
+    const r = await p;
+    check('T44 改写为超长新 user 条目→保守退出', isExit(r, 'transcript-unreadable'), brief(r));
+  },
 };
 
 const t0 = Date.now();
