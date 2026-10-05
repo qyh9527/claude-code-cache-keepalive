@@ -58,6 +58,7 @@ function readSettings() {
 }
 
 function writeSettings(obj) {
+  const mode = fs.existsSync(settingsPath) ? fs.statSync(settingsPath).mode & 0o777 : 0o600;
   if (fs.existsSync(settingsPath)) {
     const backup = `${settingsPath}.bak-${stamp()}`;
     fs.copyFileSync(settingsPath, backup);
@@ -65,7 +66,8 @@ function writeSettings(obj) {
   }
   fs.mkdirSync(configDir, { recursive: true });
   const tmp = `${settingsPath}.${process.pid}.tmp`;
-  fs.writeFileSync(tmp, JSON.stringify(obj, null, 2) + '\n');
+  fs.writeFileSync(tmp, JSON.stringify(obj, null, 2) + '\n', { mode, flag: 'wx' });
+  fs.chmodSync(tmp, mode); // 保留原权限，包括被当前 umask 收紧的位；新配置默认仅所有者可读写
   fs.renameSync(tmp, settingsPath);
 }
 

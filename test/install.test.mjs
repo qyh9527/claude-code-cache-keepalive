@@ -97,6 +97,37 @@ const backups = (dir) => fs.readdirSync(dir).filter((f) => f.startsWith('setting
   check('--any-model 切换', a.length === 1 && a[0].args.includes('--any-model') && b.length === 1 && !b[0].args.includes('--any-model'));
 }
 
+// 9. POSIX：安装、升级和卸载都保留已有配置权限。
+if (process.platform !== 'win32') {
+  const d = path.join(ROOT, 'permissions');
+  fs.mkdirSync(d);
+  const file = path.join(d, 'settings.json');
+  fs.writeFileSync(file, JSON.stringify({ env: { TEST_SECRET: 'fake-value' } }), { mode: 0o600 });
+  fs.chmodSync(file, 0o600);
+  const mode = () => fs.statSync(file).mode & 0o777;
+  const modes = [];
+  for (const flags of [[], ['--any-model'], ['--uninstall']]) {
+    const r = run(d, ...flags);
+    modes.push([r.code, mode()]);
+  }
+  check('安装升级卸载保留 0600 权限', modes.every(([code, permissions]) => code === 0 && permissions === 0o600), JSON.stringify(modes));
+
+  // 10. 新配置私有；更严格的 umask 不应改变已有文件的 0640。
+  const fresh = path.join(ROOT, 'private-fresh');
+  const oldUmask = process.umask(0o022);
+  let freshRun;
+  let preservedRun;
+  try {
+    freshRun = run(fresh);
+    fs.chmodSync(file, 0o640);
+    process.umask(0o077);
+    preservedRun = run(d);
+  } finally {
+    process.umask(oldUmask);
+  }
+  check('新配置为 0600 且保留原 mode 不受 umask 影响', freshRun.code === 0 && (fs.statSync(path.join(fresh, 'settings.json')).mode & 0o777) === 0o600 && preservedRun.code === 0 && mode() === 0o640);
+}
+
 fs.rmSync(ROOT, { recursive: true, force: true });
 const fail = results.filter((r) => !r.ok);
 console.log(`## ${results.length - fail.length}/${results.length} passed`);
