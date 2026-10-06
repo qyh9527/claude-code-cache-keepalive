@@ -91,7 +91,28 @@ The installer copies `cache-keepalive.mjs` into `<config dir>/hooks/` and adds t
 > - It replaces an earlier entry for this script instead of adding a duplicate.
 
 > [!WARNING]
-> **CC Switch 3.x users:** switching providers rewrites `settings.json` from the provider config plus the "common config" snippet. A hook that exists only in `settings.json` is lost on the next switch. Add the same `Stop` block to CC Switch's common config as well. The installer prints a reminder when it finds `~/.cc-switch`.
+> **CC Switch 3.x users:** switching providers rewrites `settings.json` from the provider config plus the "common config" snippet. A hook that exists only in `settings.json` is lost on the next switch. Use the optional template installation below, or add the same `Stop` block to common config manually. Default installation only checks whether `~/.cc-switch` exists and prints a reminder; it never opens its database.
+
+### Optional CC Switch template installation
+
+**Exit CC Switch first.** Built-in SQLite is available without a flag in Node 22.x from 22.13, Node 23.x from 23.4, and Node 24+. Node 23.0–23.3 requires `node --experimental-sqlite install.mjs --cc-switch` or an upgrade; if `node:sqlite` cannot be imported, this mode fails safely with a compatibility hint and writes nothing. This explicit mode copies the same script into `<config dir>/hooks/`, but edits only CC Switch's `common_config_claude` template, never reading or writing Claude's `settings.json`.
+
+```sh
+node install.mjs --cc-switch --dry-run
+node install.mjs --cc-switch
+node install.mjs --cc-switch --any-model
+node install.mjs --cc-switch --uninstall
+# Optional directory override (valid only with --cc-switch):
+node install.mjs --cc-switch --cc-switch-dir /path/to/.cc-switch --config-dir /path/to/.claude
+```
+
+The database defaults to `~/.cc-switch/cc-switch.db`; a missing database is rejected, not created. Restart CC Switch, then switch providers or apply configuration for the template to take effect. Normal and template installations need separate uninstall commands. Template uninstall removes only its owned handlers and **preserves the shared script**, even when no template hook is installed; it does not inspect Claude settings for references. To delete the script entirely, use normal `node install.mjs --uninstall` after removing template handlers. Normal uninstall does not check template references and can leave a template pointing to a deleted script. No automatic dual-mode management is performed.
+
+The installer validates JSON and hook/group structure before changing anything, preserving unrelated fields and handlers. It reads and merges under a `BEGIN IMMEDIATE` transaction with a three-second lock timeout. Changed existing template rows are backed up locally as `common_config_claude.bak-<timestamp>-<pid>` using exclusive creation and mode `0600` (Windows permissions follow filesystem ACLs), including on uninstall. Backups contain only the original template string, not the database; a missing row has no backup. Identical repeated installations do not back up or rewrite the template. `--dry-run` opens the database read-only, selects the template, and writes no script, configuration, or backup.
+
+**Privacy scope:** installation reads only `settings.value WHERE key = 'common_config_claude'`. It does not read providers, request logs, other setting values, or CC Switch's `settings.json`, and does not back up/export the entire database. To preserve unrelated fields, it parses the **whole template in memory**; this access limit does not guarantee that user-added secrets inside that template are never parsed. Template backups may contain those secrets: keep them private. Template contents and raw SQLite/JSON errors are not printed. There is no network access, upload, or telemetry in this installation mode. This does **not** change the runtime hook's existing read-only access to CC Switch request metadata described in [How it works](#how-it-works).
+
+Database failures roll back the template transaction (rollback failure is reported), and no success is claimed. A backup may remain after a failed update. Script copy happens after commit (template uninstall never deletes it). In this mode, installation/upgrades retain the old-script backup and write the complete script to an exclusively created temporary file in the same directory before atomic rename; a failed write/rename preserves the old script and cleans up the temporary file. If that filesystem step fails, the template may already be updated; correct permissions and rerun. This is not a distributed transaction across database and script files.
 
 ### Manual install
 

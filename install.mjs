@@ -20,6 +20,13 @@ const args = process.argv.slice(2);
 const dryRun = args.includes('--dry-run');
 const uninstall = args.includes('--uninstall');
 const anyModel = args.includes('--any-model');
+const ccSwitch = args.includes('--cc-switch');
+const ccDirFlag = args.indexOf('--cc-switch-dir');
+if (ccDirFlag >= 0 && (!ccSwitch || !args[ccDirFlag + 1] || args[ccDirFlag + 1].startsWith('--'))) {
+  console.error('--cc-switch-dir requires --cc-switch and a directory value.');
+  process.exit(1);
+}
+const ccSwitchDir = path.resolve(ccDirFlag >= 0 ? args[ccDirFlag + 1] : path.join(os.homedir(), '.cc-switch'));
 const dirFlag = args.indexOf('--config-dir');
 const configDir = path.resolve(
   dirFlag >= 0 && args[dirFlag + 1]
@@ -171,10 +178,11 @@ function removeOurHandlers(settings, { prune = false } = {}) {
     }
     const rest = group.hooks.filter((h) => !isOurHandler(h));
     removed += group.hooks.length - rest.length;
-    if (rest.length > 0) kept.push(rest.length === group.hooks.length ? group : { ...group, hooks: rest });
+    if (rest.length === group.hooks.length) kept.push(group);
+    else if (rest.length > 0) kept.push({ ...group, hooks: rest });
   }
   settings.hooks.Stop = kept;
-  if (prune) {
+  if (prune && removed > 0) {
     if (kept.length === 0) delete settings.hooks.Stop;
     if (Object.keys(settings.hooks).length === 0) delete settings.hooks;
   }
@@ -188,7 +196,131 @@ function checkNode() {
   }
 }
 
+function validateTemplate(settings) {
+  const object = (v) => v !== null && typeof v === 'object' && !Array.isArray(v);
+  if (!object(settings)) throw new Error('Invalid template');
+  if (Object.hasOwn(settings, 'hooks')) {
+    if (!object(settings.hooks)) throw new Error('Invalid hooks');
+    for (const groups of Object.values(settings.hooks)) {
+      if (!Array.isArray(groups)) throw new Error('Invalid event');
+      for (const group of groups) {
+        if (!object(group) || !Array.isArray(group.hooks) || !group.hooks.every(object)) {
+          throw new Error('Invalid group');
+        }
+      }
+    }
+  }
+}
+
+async function installCcSwitch() {
+  checkNode();
+  say('! Exit CC Switch before running this command.');
+  say('  Restart it afterwards and switch providers / apply configuration to activate the template.');
+  say('  Template uninstall removes only its handlers and preserves the shared script.');
+  say('  Normal --uninstall deletes the script without checking template references; remove template handlers first if deleting it entirely.');
+  const databasePath = path.join(ccSwitchDir, 'cc-switch.db');
+  if (!fs.existsSync(databasePath)) fail('CC Switch database does not exist; nothing was changed.');
+  let db;
+  let transaction = false;
+  let committed = false;
+  let stage = 'open';
+  let failure;
+  try {
+    stage = 'runtime';
+    const { DatabaseSync } = await import('node:sqlite');
+    stage = 'open';
+    db = new DatabaseSync(databasePath, { readOnly: dryRun });
+    db.exec('PRAGMA busy_timeout = 3000');
+    if (!dryRun) {
+      db.exec('BEGIN IMMEDIATE');
+      transaction = true;
+    }
+    stage = 'validate';
+    const row = db.prepare('SELECT value FROM settings WHERE key = ?').get('common_config_claude');
+    const original = row?.value;
+    if (original !== undefined && typeof original !== 'string') throw new Error('Invalid value');
+    const settings = original === undefined || original.trim() === '' ? {} : JSON.parse(original);
+    validateTemplate(settings);
+    const before = JSON.stringify(settings);
+    const removed = removeOurHandlers(settings, { prune: uninstall });
+    if (!uninstall) {
+      settings.hooks ??= {};
+      settings.hooks.Stop ??= [];
+      settings.hooks.Stop.push({
+        hooks: [{ type: 'command', command: 'node', args: [targetScript, ...(anyModel ? ['--any-model'] : [])], asyncRewake: true, timeout: HOOK_TIMEOUT }],
+      });
+    }
+    const changed = JSON.stringify(settings) !== before;
+    // Preflight only after the locked template has passed validation. Copy after commit:
+    // SQL failures never replace the script, but later filesystem failures cannot undo the DB.
+    stage = 'script';
+    const src = uninstall ? null : fs.readFileSync(sourceScript);
+    const existing = uninstall ? null : fs.existsSync(targetScript) ? fs.readFileSync(targetScript) : null;
+    say(`• common_config_claude: ${changed ? (uninstall ? `remove ${removed} hook handler(s)` : 'configure Stop hook') : 'already configured'}`);
+    say(`• script: ${uninstall ? 'preserved (shared script)' : (existing?.equals(src) ? 'up to date' : 'install / upgrade')}`);
+    if (!dryRun) {
+      if (changed) {
+        stage = 'backup';
+        if (row) {
+          const backup = path.join(ccSwitchDir, `common_config_claude.bak-${stamp()}-${process.pid}`);
+          fs.writeFileSync(backup, original, { mode: 0o600, flag: 'wx' });
+          say('  Original template row backed up locally (not the database).');
+        }
+        stage = 'update';
+        db.prepare('INSERT OR REPLACE INTO settings(key, value) VALUES (?, ?)')
+          .run('common_config_claude', JSON.stringify(settings, null, 2) + '\n');
+      }
+      db.exec('COMMIT');
+      transaction = false;
+      committed = true;
+      stage = 'script';
+      if (!uninstall && !existing?.equals(src)) {
+        fs.mkdirSync(path.dirname(targetScript), { recursive: true });
+        if (existing) fs.copyFileSync(targetScript, `${targetScript}.bak-${stamp()}`);
+        const tmp = `${targetScript}.${process.pid}.${stamp()}.tmp`;
+        let created = false;
+        try {
+          const fd = fs.openSync(tmp, 'wx', 0o600);
+          created = true;
+          try { fs.writeFileSync(fd, src); }
+          finally { fs.closeSync(fd); }
+          fs.renameSync(tmp, targetScript);
+          created = false;
+        } finally {
+          if (created) fs.rmSync(tmp);
+        }
+      }
+    }
+  } catch {
+    // Never disclose SQLite or JSON errors: either can contain user secrets.
+    failure = committed
+      ? 'Template transaction committed, but the script operation failed. Resolve filesystem permissions and rerun; no success is claimed.'
+      : stage === 'runtime'
+        ? 'node:sqlite is unavailable. Use Node 22.x >=22.13, Node 23.x >=23.4, Node 24+, or enable --experimental-sqlite. Nothing was changed.'
+      : stage === 'validate'
+        ? 'CC Switch template or settings schema is invalid or unsupported; no template or script changes were made.'
+        : 'CC Switch operation failed (database unavailable, locked, unsupported, or filesystem failure). No template changes were committed; a local row backup may remain.';
+    if (transaction) {
+      try { db.exec('ROLLBACK'); transaction = false; }
+      catch { failure = 'CC Switch operation failed; rollback could not be confirmed. Check the local template before retrying.'; }
+    }
+  } finally {
+    if (db) {
+      try { db.close(); }
+      catch { failure = 'CC Switch database close failed. Check the local template and script before retrying.'; }
+    }
+  }
+  if (failure) fail(failure);
+  say(dryRun ? 'Dry run finished.' : uninstall ? 'Uninstalled from CC Switch template. Logs and state were left in place.' : 'Installed in CC Switch template. Apply it in CC Switch to activate.');
+}
+
 say(`Claude config dir: ${configDir}${dryRun ? '  (dry run, nothing will be written)' : ''}`);
+
+// Explicit opt-in only, before any settings.json read (including uninstall).
+if (ccSwitch) {
+  await installCcSwitch();
+  process.exit(0);
+}
 
 if (uninstall) {
   const settings = readSettings();
@@ -241,6 +373,6 @@ if (JSON.stringify(settings) === before) {
 if (fs.existsSync(path.join(os.homedir(), '.cc-switch'))) {
   say('');
   say('! CC Switch detected. CC Switch 3.x rewrites settings.json when you switch providers.');
-  say('  Add the same Stop hook to CC Switch > common config, or it will be lost on the next switch.');
+  say('  Choose node install.mjs --cc-switch to install into its common config template, or add the hook there manually.');
 }
 say(dryRun ? 'Dry run finished.' : '✓ Installed. Claude Code picks up the hook without a restart.');

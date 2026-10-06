@@ -96,7 +96,28 @@ node install.mjs
 > - 已有本脚本的旧条目会被替换，不会重复添加。
 
 > [!WARNING]
-> **CC Switch 3.x 用户：** 切换供应商时，CC Switch 会用"供应商配置 + 通用配置片段"整份重写 `settings.json`。只写在 `settings.json` 里的 hook，下次切换就会丢失。请在 CC Switch 的「通用配置」里也加上同一段 `Stop` 配置。安装器发现 `~/.cc-switch` 时会提醒你。
+> **CC Switch 3.x 用户：** 切换供应商时，CC Switch 会用“供应商配置 + 通用配置片段”重写 `settings.json`。只写在 `settings.json` 里的 hook，下次切换就会丢失。可使用下面的可选模板安装，或手动加入通用配置。默认安装仅检查 `~/.cc-switch` 是否存在并提醒，不打开数据库。
+
+### 可选：安装到 CC Switch 通用配置模板
+
+**先退出 CC Switch。** 内置 SQLite 在 Node 22.x 的 22.13 起、Node 23.x 的 23.4 起以及 Node 24+ 无需开关。Node 23.0–23.3 需使用 `node --experimental-sqlite install.mjs --cc-switch` 或升级；若无法导入 `node:sqlite`，此模式安全退出并给出版本提示，不写任何目标。显式模式把同一脚本复制到 `<配置目录>/hooks/`，但只修改 CC Switch 的 `common_config_claude` 模板，不读取或写入 Claude 的 `settings.json`。
+
+```sh
+node install.mjs --cc-switch --dry-run
+node install.mjs --cc-switch
+node install.mjs --cc-switch --any-model
+node install.mjs --cc-switch --uninstall
+# 可选目录覆盖，仅能配合 --cc-switch：
+node install.mjs --cc-switch --cc-switch-dir /path/to/.cc-switch --config-dir /path/to/.claude
+```
+
+数据库默认是 `~/.cc-switch/cc-switch.db`，不存在就拒绝，不会新建。操作后启动 CC Switch，再切换供应商或应用配置使模板生效。普通安装与模板安装需要分别卸载。模板卸载仅移除本工具的 handler，**保留共享脚本**，即使模板从未安装 hook 也不删除；不会读取 Claude settings 检测引用。需要彻底删除脚本时，先移除模板条目，再执行普通 `node install.mjs --uninstall`。普通卸载不检查模板引用，可能留下指向已删除脚本的模板条目。安装器不自动管理双模式状态。
+
+安装器先校验 JSON 和 hook/分组结构，保留无关字段与 handler。在 `BEGIN IMMEDIATE` 事务内读取、合并、备份和更新，锁等待最多三秒。修改已有模板时（含卸载），仅将原模板字符串备份到本地 `common_config_claude.bak-<时间戳>-<pid>`，排他创建、权限 `0600`（Windows 按文件系统 ACL 控制）；不是整库备份，缺失模板行时不备份。重复安装内容相同不备份、不重写模板。`--dry-run` 只读打开数据库并查询模板，不写脚本、配置或备份。
+
+**隐私访问范围：** 安装只读取 `settings` 表中 `key = 'common_config_claude'` 的 `value`，不读取供应商、请求日志、其他 setting 值或 CC Switch 的 `settings.json`，不备份或导出整个数据库。为了保留无关字段，会在内存中解析**整个模板**；这是访问范围限制，并不保证用户自行放入模板的秘密不会被解析。模板行备份也可能含这些秘密，请妥善保管。安装器不打印模板内容或数据库/JSON 原始错误，无网络访问、上传或遥测。这些承诺仅针对新安装方式；已有运行时 hook 仍会只读 CC Switch 请求元数据，见「工作原理」。
+
+数据库失败会回滚模板事务，无法确认回滚时会明确报错，不会宣称成功；失败更新可能留下模板行备份。脚本复制在数据库提交后执行（模板卸载不删除脚本）。此模式安装/升级保留旧脚本备份，先排他创建同目录临时文件，完整写入后原子 rename 替换；写入或 rename 失败时旧脚本保持完整，并清理临时文件。若文件操作失败，模板可能已经更新，需要修正文件权限后重跑。数据库和脚本之间没有跨文件分布式事务。
 
 ### 手动安装
 
