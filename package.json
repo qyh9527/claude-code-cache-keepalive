@@ -1,0 +1,11 @@
+{
+  "name": "claude-code-cache-keepalive",
+  "private": true,
+  "type": "module",
+  "engines": { "node": ">=22.13.0" },
+  "scripts": {
+    "test": "node test/run.mjs && node test/install.test.mjs && node --test test/runner.test.mjs && npm run test:fuzz",
+    "test:fuzz": "node --test test/fuzz.test.mjs"
+  },
+  "devDependencies": { "fast-check": "4.10.2" }
+}
