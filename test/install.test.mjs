@@ -159,6 +159,10 @@ if (process.platform !== 'win32') {
   fs.mkdirSync(d);
   const ours = [
     { type: 'command', command: 'node --no-warnings "/old/path/cache-keepalive.mjs"' },
+    { type: 'command', command: 'node --require="/libs/with spaces/bootstrap.cjs" "/old path/cache-keepalive.mjs"' },
+    { type: 'command', command: "node --import='/libs/with spaces/bootstrap.mjs' '/old path/cache-keepalive.mjs'" },
+    { type: 'command', command: 'node -r"/libs/with spaces/bootstrap.cjs" /old/cache-keepalive.mjs' },
+    { type: 'command', command: 'node /old\\ path/cache-keepalive.mjs' },
     { type: 'command', command: 'node', args: ['--no-warnings', '/old/cache-keepalive.mjs'] },
     { type: 'command', command: 'node', args: ['--require', '/libs/bootstrap.cjs', '/old/cache-keepalive.mjs'] },
     { type: 'command', command: 'node', args: ['-rbootstrap.cjs', '/old/cache-keepalive.mjs'] },
@@ -167,6 +171,8 @@ if (process.platform !== 'win32') {
     { type: 'command', command: 'node', args: ['--no-warnings', '--', '/old/cache-keepalive.mjs'] },
   ];
   const others = [
+    { type: 'command', command: 'node --require="/data/with spaces/cache-keepalive.mjs" audit.mjs' },
+    { type: 'command', command: "node --import='/data/with spaces/cache-keepalive.mjs' audit.mjs" },
     { type: 'command', command: 'node', args: ['--eval', 'cache-keepalive.mjs'] },
     { type: 'command', command: 'node', args: ['--print', 'cache-keepalive.mjs'] },
     { type: 'command', command: 'node', args: ['--check', '/data/cache-keepalive.mjs'] },

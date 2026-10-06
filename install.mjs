@@ -86,10 +86,45 @@ function isOurNodeScript(argv) {
   return false;
 }
 
+// 把相邻的普通片段和引号片段合成一个参数，例如 --require="带空格的路径"。
+// 不执行命令或展开变量；保留 Windows 路径中的普通反斜杠。
+function commandWords(command) {
+  const words = [];
+  let word = '';
+  let quote = null;
+  let started = false;
+  for (let i = 0; i < command.length; i += 1) {
+    const char = command[i];
+    const next = command[i + 1];
+    if (char === '\\' && quote !== "'" && next !== undefined &&
+        (next === '"' || next === '\\' || (quote === null && /[ \t\r\n']/.test(next)))) {
+      word += next;
+      started = true;
+      i += 1;
+    } else if (quote !== null) {
+      if (char === quote) quote = null;
+      else word += char;
+    } else if (char === '"' || char === "'") {
+      quote = char;
+      started = true;
+    } else if (/[ \t\r\n]/.test(char)) {
+      if (started) words.push(word);
+      word = '';
+      started = false;
+    } else {
+      word += char;
+      started = true;
+    }
+  }
+  if (quote !== null) return null;
+  if (started) words.push(word);
+  return words;
+}
+
 function isOurHandler(h) {
   if (!h || h.type !== 'command' || typeof h.command !== 'string') return false;
-  const words = [...h.command.matchAll(/"([^"]*)"|'([^']*)'|([^\s]+)/g)]
-    .map((match) => match[1] ?? match[2] ?? match[3]);
+  const words = commandWords(h.command);
+  if (words === null) return false;
   const executable = words.shift();
   if (!executable || !/^node(?:\.exe)?$/i.test(portableBasename(executable))) return false;
   return isOurNodeScript([...words, ...(Array.isArray(h.args) ? h.args : [])]);
