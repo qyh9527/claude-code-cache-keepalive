@@ -13,14 +13,17 @@ const WAKE1 = '[cache-keepalive] 后台任务仍在运行，这是自动缓存�
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const iso = (ms) => new Date(ms).toISOString();
 
-async function waitForState(c, session) {
+async function waitForState(c, session, previousOwner) {
   const file = path.join(c.state, session + '.json');
-  const deadline = Date.now() + 5000;
+  const deadline = Date.now() + 10000;
   while (Date.now() < deadline) {
-    try { return JSON.parse(fs.readFileSync(file, 'utf8')); } catch { /* 尚未写入 */ }
+    try {
+      const state = JSON.parse(fs.readFileSync(file, 'utf8'));
+      if (previousOwner === undefined || state.owner !== previousOwner) return state;
+    } catch { /* 尚未写入 */ }
     await sleep(10);
   }
-  throw new Error('hook state was not created');
+  throw new Error('hook state was not created or ownership did not change');
 }
 
 function mkCase(name) {
@@ -137,9 +140,11 @@ const cases = {
   },
   async T10() {
     const c = mkCase('T10');
-    const pa = run(c, inp(c, 's10', [SUB]), { CACHE_KEEPALIVE_FIRE_AFTER_S: '36' });
-    await sleep(2000);
-    const pb = run(c, inp(c, 's10', [SUB]), { CACHE_KEEPALIVE_FIRE_AFTER_S: '36' });
+    // 等实际取得所有权后才启动下一实例；Windows 上进程启动顺序不保证写入顺序。
+    const pa = run(c, inp(c, 's10', [SUB]), { CACHE_KEEPALIVE_FIRE_AFTER_S: '45' });
+    const first = await waitForState(c, 's10');
+    const pb = run(c, inp(c, 's10', [SUB]), { CACHE_KEEPALIVE_FIRE_AFTER_S: '45' });
+    await waitForState(c, 's10', first.owner);
     const [a, b] = await Promise.all([pa, pb]);
     const lines = fs.readFileSync(path.join(c.state, 'log.jsonl'), 'utf8').trim().split('\n').map((l) => JSON.parse(l).reason ?? 'wake');
     check('T10 竞态：先启动 superseded，后启动 wake', a.code === 0 && b.code === 2 && lines.includes('superseded') && lines.includes('wake'), `a=${a.code} b=${b.code} log=${lines.join(',')}`);
