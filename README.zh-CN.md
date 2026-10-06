@@ -96,7 +96,43 @@ node install.mjs
 > - 已有本脚本的旧条目会被替换，不会重复添加。
 
 > [!WARNING]
-> **CC Switch 3.x 用户：** 切换供应商时，CC Switch 会用"供应商配置 + 通用配置片段"整份重写 `settings.json`。只写在 `settings.json` 里的 hook，下次切换就会丢失。请在 CC Switch 的「通用配置」里也加上同一段 `Stop` 配置。安装器发现 `~/.cc-switch` 时会提醒你。
+> **CC Switch 用户：** 某些版本切换供应商时会重写 `settings.json`，只存在于该文件的 hook 可能丢失。请按下面的步骤手动配置；安装器只检测 `~/.cc-switch` 是否存在并提醒，不自动修改 CC Switch 的通用模板或供应商配置。
+
+### CC Switch：手动配置通用模板
+
+以下步骤依据 **CC Switch 3.16.5 的旧通用配置机制**。其他版本需确认相应入口；上游开发分支 `8596a23` 已改变该机制，不能保证此方法适用。
+
+1. 运行 `node install.mjs` 安装脚本，记下输出中的脚本绝对路径。
+2. **先不要切换供应商。** 在 CC Switch 中编辑当前 Claude 供应商，把下面的 `hooks.Stop` 条目合并到「通用配置」JSON；保留其他字段及已有 hook，将示例路径换成实际绝对路径。
+3. 启用 **Apply Common Config（应用通用配置）**，保存**整个供应商表单**，不要只关闭通用配置编辑器。
+4. 对其他需要使用的 Claude 供应商逐个启用该选项并保存，再切换供应商。未启用时，模板不保证生效。
+
+```json
+{
+  "hooks": {
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node",
+            "args": ["/absolute/path/to/cache-keepalive.mjs"],
+            "asyncRewake": true,
+            "timeout": 360
+          }
+        ]
+      }
+    ]
+  }
+}
+```
+
+> [!WARNING]
+> 在 3.16.5 中，直接切换可能将旧 live 配置回填到通用模板，撤销刚做的修改。卸载时，先从通用模板和相关供应商配置中移除本工具条目，确认当前供应商的配置 JSON 也已移除并保存，再运行 `node install.mjs --uninstall`；否则切换时可能恢复旧条目。只移除本工具的 handler，不删除其他 hook。
+
+**隐私范围：** 这些步骤由你在 CC Switch GUI 中手动完成；安装器不打开 CC Switch 数据库、不读取供应商或通用模板、不上传配置。此说明仅针对安装过程，运行时保活脚本仍会只读请求元数据，见「工作原理」。
+
+源码依据：[3.16.5 切换时回填](https://github.com/farion1231/cc-switch/blob/8d1b3306d09a27b9d8fc29694791d8421aba5f93/src-tauri/src/services/provider/mod.rs#L2190-L2244)、[通用配置启用条件](https://github.com/farion1231/cc-switch/blob/8d1b3306d09a27b9d8fc29694791d8421aba5f93/src-tauri/src/services/provider/live.rs#L354-L368)。
 
 ### 手动安装
 

@@ -91,7 +91,43 @@ The installer copies `cache-keepalive.mjs` into `<config dir>/hooks/` and adds t
 > - It replaces an earlier entry for this script instead of adding a duplicate.
 
 > [!WARNING]
-> **CC Switch 3.x users:** switching providers rewrites `settings.json` from the provider config plus the "common config" snippet. A hook that exists only in `settings.json` is lost on the next switch. Add the same `Stop` block to CC Switch's common config as well. The installer prints a reminder when it finds `~/.cc-switch`.
+> **CC Switch users:** some versions rewrite `settings.json` when switching providers, so hooks present only in that file may be lost. Follow the manual steps below. The installer only detects whether `~/.cc-switch` exists and prints a reminder; it does not automatically modify CC Switch's common template or provider configuration.
+
+### CC Switch: manually configure the common template
+
+These steps are based on **CC Switch 3.16.5's legacy common-config mechanism**. For other versions, verify the corresponding UI and behavior. Upstream development commit `8596a23` changed this mechanism; this method is not guaranteed to apply there.
+
+1. Run `node install.mjs` to install the script, and note its absolute path in the output.
+2. **Do not switch providers yet.** Edit the current Claude provider in CC Switch and merge the `hooks.Stop` entry below into its common-config JSON. Preserve other fields and existing hooks, and replace the example path with the actual absolute path.
+3. Enable **Apply Common Config** and save the **entire provider form**, not just close the common-config editor.
+4. Enable that option and save the form for each other Claude provider you intend to use before switching. Without opt-in, template application is not guaranteed.
+
+```json
+{
+  "hooks": {
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node",
+            "args": ["/absolute/path/to/cache-keepalive.mjs"],
+            "asyncRewake": true,
+            "timeout": 360
+          }
+        ]
+      }
+    ]
+  }
+}
+```
+
+> [!WARNING]
+> In 3.16.5, switching first can backfill old live configuration into the common template and undo your changes. To uninstall, first remove this tool's entries from the common template and relevant provider configurations, ensure the current provider's configuration JSON also has the entry removed, and save its form before running `node install.mjs --uninstall`. Otherwise switching may restore the old entry. Remove only this tool's handler, not unrelated hooks.
+
+**Privacy scope:** you perform these steps manually in the CC Switch GUI. The installer does not open the CC Switch database, read providers or the common template, or upload configuration. This statement covers installation only; the runtime keepalive hook still reads request metadata in read-only mode, as described in [How it works](#how-it-works).
+
+Source references: [3.16.5 switch-time backfill](https://github.com/farion1231/cc-switch/blob/8d1b3306d09a27b9d8fc29694791d8421aba5f93/src-tauri/src/services/provider/mod.rs#L2190-L2244), [common-config opt-in gate](https://github.com/farion1231/cc-switch/blob/8d1b3306d09a27b9d8fc29694791d8421aba5f93/src-tauri/src/services/provider/live.rs#L354-L368).
 
 ### Manual install
 
