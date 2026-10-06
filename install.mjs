@@ -39,15 +39,60 @@ const stamp = () => new Date().toISOString().replace(/[:.]/g, '-');
 
 // 只识别 node 实际执行的脚本；相似文件名及传给其他脚本的数据参数都不属于本工具。
 const portableBasename = (p) => p.replaceAll('\\', '/').split('/').at(-1);
+// Node CLI 的带值选项必须连同参数一起跳过，参数即使恰好是本脚本名也不能表示归属。
+const NODE_VALUE_OPTIONS = new Set([
+  '-r', '--require', '-C', '--conditions', '--import', '--loader', '--experimental-loader',
+  '--env-file', '--env-file-if-exists', '--experimental-config-file', '--experimental-default-type',
+  '--allow-fs-read', '--allow-fs-write', '--build-snapshot-config', '--experimental-sea-config',
+  '--cpu-prof-dir', '--cpu-prof-interval', '--cpu-prof-name', '--diagnostic-dir', '--disable-proto',
+  '--disable-warning', '--dns-result-order', '--heap-prof-dir', '--heap-prof-interval', '--heap-prof-name',
+  '--heapsnapshot-near-heap-limit', '--heapsnapshot-signal', '--icu-data-dir', '--input-type',
+  '--debug-port', '--inspect-port', '--inspect-publish-uid', '--localstorage-file', '--max-http-header-size',
+  '--max-old-space-size', '--max-old-space-size-percentage', '--max-semi-space-size', '--stack-size',
+  '--network-family-autoselection-attempt-timeout', '--openssl-config', '--redirect-warnings',
+  '--report-directory', '--report-dir', '--report-filename', '--report-signal', '--secure-heap',
+  '--secure-heap-min', '--snapshot-blob', '--test-concurrency', '--test-coverage-branches',
+  '--test-coverage-exclude', '--test-coverage-functions', '--test-coverage-include', '--test-coverage-lines',
+  '--test-global-setup', '--experimental-test-isolation', '--test-isolation', '--test-name-pattern',
+  '--test-random-seed', '--test-reporter', '--test-reporter-destination', '--test-rerun-failures',
+  '--test-shard', '--test-skip-pattern', '--test-timeout', '--experimental-test-tag-filter', '--title',
+  '--tls-cipher-list', '--tls-keylog', '--trace-event-categories', '--trace-event-file-pattern',
+  '--trace-require-module', '--unhandled-rejections', '--use-largepages', '--v8-pool-size',
+  '--watch-kill-signal', '--watch-path',
+]);
+const NODE_NON_SCRIPT_OPTIONS = new Set([
+  '-e', '--eval', '-p', '--print', '-c', '--check', '-h', '--help', '-v', '--version',
+  '--run', '--v8-options', '--completion-bash',
+]);
+
+function isOurNodeScript(argv) {
+  const matches = (arg) => typeof arg === 'string' && portableBasename(arg) === SCRIPT_NAME;
+  for (let i = 0; i < argv.length; i += 1) {
+    const arg = argv[i];
+    if (typeof arg !== 'string') return false;
+    if (arg === '--') return matches(argv[i + 1]);
+    if (arg === '-') return false; // 标准输入，不执行路径参数
+    if (!arg.startsWith('-')) return matches(arg);
+    const option = arg.split('=', 1)[0].replaceAll('_', '-');
+    if (NODE_NON_SCRIPT_OPTIONS.has(option) || /^-[epc]/.test(arg)) return false;
+    if (arg.startsWith('--') && arg.includes('=')) continue;
+    if (/^-[rC].+/.test(arg)) continue; // -rmodule / -Ccondition
+    if (NODE_VALUE_OPTIONS.has(option)) {
+      if (typeof argv[++i] !== 'string') return false;
+      continue;
+    }
+    if (!arg.startsWith('--') && arg !== '-i') return false;
+  }
+  return false;
+}
+
 function isOurHandler(h) {
   if (!h || h.type !== 'command' || typeof h.command !== 'string') return false;
   const words = [...h.command.matchAll(/"([^"]*)"|'([^']*)'|([^\s]+)/g)]
     .map((match) => match[1] ?? match[2] ?? match[3]);
   const executable = words.shift();
   if (!executable || !/^node(?:\.exe)?$/i.test(portableBasename(executable))) return false;
-  const argv = [...words, ...(Array.isArray(h.args) ? h.args : [])];
-  if (argv[0] === '--') argv.shift();
-  return typeof argv[0] === 'string' && portableBasename(argv[0]) === SCRIPT_NAME;
+  return isOurNodeScript([...words, ...(Array.isArray(h.args) ? h.args : [])]);
 }
 
 function readSettings() {

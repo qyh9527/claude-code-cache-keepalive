@@ -153,6 +153,37 @@ if (process.platform !== 'win32') {
   check('卸载保留相似文件名和数据参数', removed.code === 0 && JSON.stringify(settingsOf(d).hooks.Stop.flatMap((g) => g.hooks)) === JSON.stringify(others));
 }
 
+// 13–14. Node 前置运行参数不影响脚本归属；选项的数据参数不会误删其他 hook。
+{
+  const d = path.join(ROOT, 'node-options');
+  fs.mkdirSync(d);
+  const ours = [
+    { type: 'command', command: 'node --no-warnings "/old/path/cache-keepalive.mjs"' },
+    { type: 'command', command: 'node', args: ['--no-warnings', '/old/cache-keepalive.mjs'] },
+    { type: 'command', command: 'node', args: ['--require', '/libs/bootstrap.cjs', '/old/cache-keepalive.mjs'] },
+    { type: 'command', command: 'node', args: ['-rbootstrap.cjs', '/old/cache-keepalive.mjs'] },
+    { type: 'command', command: 'node', args: ['--import=/libs/bootstrap.mjs', '/old/cache-keepalive.mjs'] },
+    { type: 'command', command: 'node', args: ['--max-old-space-size', '512', '--inspect=0', '/old/cache-keepalive.mjs'] },
+    { type: 'command', command: 'node', args: ['--no-warnings', '--', '/old/cache-keepalive.mjs'] },
+  ];
+  const others = [
+    { type: 'command', command: 'node', args: ['--eval', 'cache-keepalive.mjs'] },
+    { type: 'command', command: 'node', args: ['--print', 'cache-keepalive.mjs'] },
+    { type: 'command', command: 'node', args: ['--check', '/data/cache-keepalive.mjs'] },
+    { type: 'command', command: 'node', args: ['--require', '/data/cache-keepalive.mjs', 'audit.mjs'] },
+    { type: 'command', command: 'node', args: ['--require=/data/cache-keepalive.mjs', 'audit.mjs'] },
+    { type: 'command', command: 'node', args: ['-r/data/cache-keepalive.mjs', 'audit.mjs'] },
+    { type: 'command', command: 'node', args: ['--title', 'cache-keepalive.mjs', 'audit.mjs'] },
+    { type: 'command', command: 'node', args: ['-ecache-keepalive.mjs'] },
+  ];
+  fs.writeFileSync(path.join(d, 'settings.json'), JSON.stringify({ hooks: { Stop: [{ hooks: [...others, ...ours] }] } }));
+  const installed = run(d);
+  const handlers = settingsOf(d).hooks.Stop.flatMap((g) => g.hooks);
+  check('前置 Node 参数的旧 hook 正确替换且数据参数保留', installed.code === 0 && handlers.length === others.length + 1 && JSON.stringify(handlers.slice(0, others.length)) === JSON.stringify(others));
+  const removed = run(d, '--uninstall');
+  check('前置 Node 参数的旧 hook 正确卸载', removed.code === 0 && JSON.stringify(settingsOf(d).hooks.Stop.flatMap((g) => g.hooks)) === JSON.stringify(others));
+}
+
 fs.rmSync(ROOT, { recursive: true, force: true });
 const fail = results.filter((r) => !r.ok);
 console.log(`## ${results.length - fail.length}/${results.length} passed`);
