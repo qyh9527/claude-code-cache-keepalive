@@ -198,6 +198,27 @@ node --test test/runner.test.mjs   # 测试入口的成功／失败退出码
 
 每次运行和每个场景都用独立的临时目录，不会碰真实的 `~/.claude`、日志和代理数据库。hook 的每个场景还各有自己的 transcript 和迷你 SQLite 库。任何检查失败时测试入口都会返回非零退出码，可直接用于 CI。
 
+### 可复现的 fuzz 测试
+
+开发时安装锁定的测试依赖，再运行完整测试：
+
+```sh
+npm ci --ignore-scripts
+npm test
+npm run test:fuzz                 # 仅 fuzz
+```
+
+`fast-check` 仅为开发依赖，运行和安装 hook 仍然只需 Node 内置模块。默认每条辅助函数属性生成 10,000 个用例，另做 25 次安装器 CLI 往返测试。覆盖命令引号和 Node 参数、本工具 hook 的移除，以及 256KB 边界附近的 transcript 活动判断；后者用全文件字节位置作独立参照，包含 Unicode 和时间戳阈值。CLI 测试检查配置保留、重复安装幂等、卸载和 POSIX 权限。私有辅助函数从实际独立脚本加载到隔离的 VM 中，不在测试里复制实现。
+
+`FUZZ_RUNS` 控制辅助函数用例数，`FUZZ_INSTALL_RUNS` 控制 CLI 用例数，`FUZZ_SEED` 指定有符号 32 位种子，默认 `24301`。失败报告会给出缩减后的输入、种子和 path。复现时用报告里的种子和 path，并按完整名称只选中失败的测试，例如 PowerShell：
+
+```powershell
+$env:FUZZ_SEED='24301'; $env:FUZZ_PATH='0:1'; node --test --test-name-pattern='^hook ownership follows the script, never option values or data args$' test/fuzz.test.mjs
+Remove-Item Env:FUZZ_PATH,Env:FUZZ_SEED
+```
+
+请把示例种子和 path 替换为失败报告中的值。确认缺陷后，先把最小输入固化为回归用例再修复。GitHub Actions 在 Linux／Windows、Node 22／24 上运行完整测试，每条辅助函数属性生成 1,000 个用例，另做 25 次 CLI 往返。CI 使用工作流运行序号作为种子，每条属性都会打印，方便复现失败。
+
 ## 已知限制
 
 - **权限弹窗：** Claude Code 等待权限确认时，这一轮还没结束，`Stop` 不会触发，所以这段时间无法保活。

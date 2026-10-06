@@ -191,6 +191,27 @@ node --test test/runner.test.mjs   # successful and failed test-runner exit code
 
 Every run and scenario uses its own temp directory, so your real `~/.claude`, logs, and proxy database are never touched. Each hook scenario also gets its own transcript and a small SQLite database. Any failed check makes the test runner exit nonzero, so it can be used directly in CI.
 
+### Seeded fuzz tests
+
+For development, install the locked test dependencies and run the complete suite:
+
+```sh
+npm ci --ignore-scripts
+npm test
+npm run test:fuzz                 # fuzz only
+```
+
+`fast-check` is a development dependency; running or installing the hook still needs only Node's built-in modules. The fuzz suite runs 10,000 generated cases per helper property and 25 installer CLI round trips by default. It checks command quoting and Node options, removal of owned hooks, and transcript activity against a full-file byte oracle around the 256 KB boundary, including Unicode and timestamp thresholds. CLI round trips check config preservation, idempotence, uninstall, and POSIX permissions. Private helpers are loaded from the actual standalone scripts into isolated VM contexts; their implementations are not copied into tests.
+
+`FUZZ_RUNS` changes the helper case count, `FUZZ_INSTALL_RUNS` changes the CLI case count, and `FUZZ_SEED` selects a signed 32-bit seed (default `24301`). A failure reports its minimized counterexample, seed and path. Replay only the failing test by its exact name, using the reported seed and path; for example, in PowerShell:
+
+```powershell
+$env:FUZZ_SEED='24301'; $env:FUZZ_PATH='0:1'; node --test --test-name-pattern='^hook ownership follows the script, never option values or data args$' test/fuzz.test.mjs
+Remove-Item Env:FUZZ_PATH,Env:FUZZ_SEED
+```
+
+Replace the example seed and path with the failure report's values. Turn confirmed failures into fixed regression cases before fixing them. GitHub Actions runs the complete suite on Linux and Windows with Node 22 and 24, using 1,000 cases per helper property and 25 CLI round trips. Its seed is the workflow run number, printed with each property so failures remain reproducible.
+
 ## Limitations
 
 - **Permission prompts:** while Claude Code is waiting on a permission prompt, the turn has not ended, so `Stop` does not fire and nothing can be kept warm.
