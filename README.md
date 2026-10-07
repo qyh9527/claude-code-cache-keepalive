@@ -205,7 +205,7 @@ Common `reason` values in the log:
 
 Thresholds are constants near the top of the script: `FIRE_AFTER_MS` (270 s), `STALE_MS`, `MAX_WAKES`, `CAP_MS`, `SHELL_MAX_AGE_MS`, and `PERSISTENT_PATTERNS`. Edit them there.
 
-The wake message is in Chinese and asks the model to reply `保活`. To change the language, edit `WAKE_MESSAGE`. If you use the GPROXY rule below, keep both `KEEPALIVE_MARKER` and the first sentence `自动缓存保活唤醒。` unchanged, or edit the rule to match.
+The wake message is in Chinese and asks the model to reply `保活`. To change the language, edit `WAKE_MESSAGE`. If you use the GPROXY rule below, keep `KEEPALIVE_MARKER` unchanged. The rest of the wake sentence can be edited freely.
 
 These environment variables exist for tests:
 
@@ -225,51 +225,51 @@ Every wake sends the same text, starting with `[cc-cache-keepalive:v1]`. The wak
 
 This is optional. The hook has no GPROXY dependency, and without GPROXY the model still replies `保活`.
 
-The rule:
+It needs GPROXY [1617792](https://github.com/LeenHawk/gproxy/commit/1617792ee70943a35c009c2cd7a7aae0adf96413) or later, where `filterBody` accepts a [JMESPath expression](https://github.com/LeenHawk/gproxy/blob/1617792ee70943a35c009c2cd7a7aae0adf96413/docs/src/content/docs/zh-cn/guides/rules.md) (section "JMESPath 表达式"). The rule:
 
 ```json
 {
-  "action": "replace",
+  "action": "set",
   "phase": "request",
   "target": "body",
-  "pattern": "(?s)(\"max_tokens\"\\s*:\\s*)[0-9]+(\\s*,\\s*\"messages\"\\s*:\\s*\\[.*\\{\\s*\"type\"\\s*:\\s*\"text\"\\s*,\\s*\"text\"\\s*:\\s*\"(?:[^\"\\\\]|\\\\.)*\\[cc-cache-keepalive:v1\\] 自动缓存保活唤醒。(?:[^\"\\\\]|\\\\.)*\"\\s*(?:,\\s*\"cache_control\"\\s*:\\s*\\{[^{}]*\\})?\\s*\\}\\s*\\]\\s*\\}\\s*\\]\\s*,\\s*\"model\")",
-  "replacement": "${1}0${2}",
+  "paths": ["max_tokens"],
+  "pattern": "",
+  "replacement": "0",
   "filterOperationKeys": [
     { "operation": "generate_content", "dialect": "claude" },
     { "operation": "stream_generate_content", "dialect": "claude" }
   ],
+  "filterBody": "(type(messages[-1].content) == 'string' && contains(messages[-1].content, '[cc-cache-keepalive:v1]')) || (type(messages[-1].content) == 'array' && length(messages[-1].content[?type(text) == 'string' && contains(text, '[cc-cache-keepalive:v1]')]) > `0`)",
   "enabled": true
 }
 ```
 
 Scope:
 
-- GPROXY applies rewrite rules after converting to the upstream protocol, and its current Claude wire struct serializes `max_tokens` right before `messages` ([source](https://github.com/LeenHawk/gproxy/blob/edecf51f204ea499d301c812e5d56b259910ed4c/crates/gproxy-protocol/src/wire/claude/generate_content.rs#L17-L24)).
-- The regex only matches when all of these hold:
-  - The marker plus the fixed first sentence, `[cc-cache-keepalive:v1] 自动缓存保活唤醒。`, sits inside one JSON string of a `{"type":"text","text":...}` block.
-  - That block is the last block of the last message.
-  - `messages` closes right after it and `"model"` follows, which is GPROXY's current field order.
+- The action runs only when `filterBody` returns boolean `true`. Type errors, unknown functions, other evaluation errors and non-boolean results don't trigger it, and the expression is validated on save.
+- Only `messages[-1]` is checked, so markers left in history don't match later requests.
+- String content is searched directly. Claude Code records the Stop hook feedback as a user message with plain-string content, possibly preceded by other text.
+- In block-array content (the wire form may become one when `cache_control` is added), only blocks whose `text` field is a string are searched, so `tool_result` content isn't looked into.
 
-  Text before the marker is allowed, since Claude Code wraps hook stderr in its own prefix. Old keepalive messages stay in history, so a marker in an earlier message must not match. Tool results can't match because a tool_result's inner text block is followed by more closers before `messages` ends.
-- GPROXY's structured `filterBody` has no "last array element contains" selector yet ([docs](https://github.com/LeenHawk/gproxy/blob/edecf51f204ea499d301c812e5d56b259910ed4c/docs/src/content/docs/zh-cn/guides/rules.md#L99-L106)), which is why this is a body regex.
-- It depends on GPROXY's current serialization layout, not on a protocol guarantee. If the layout changes, or Claude Code appends other blocks after the hook text, the rule simply doesn't match and the request goes through unchanged.
-
-Expected behavior of the regex:
+Expected behavior:
 
 | Case | Result |
 |---|---|
-| Marker in the current last user message | Matches, `max_tokens` becomes 0 |
-| Last text block carries `cache_control` | Still matches |
-| Marker only in history, followed by more assistant/user messages | Must not match |
-| Normal Claude request without the marker | Must not match |
-| Marker text inside a tool_result in the last message | Must not match |
-| A user's own last message mentioning just the marker | Must not match |
+| Marker in the last message, content is a string (with the hook wrapper) | Matches |
+| Marker in a text block of the last message, block array, with or without `cache_control` | Matches |
+| Marker only in history, followed by more messages | Must not match |
+| Normal request without the marker | Must not match |
+| Marker only inside a `tool_result` in the last message | Must not match |
 | Codex / Gemini / other dialects | Excluded by `filterOperationKeys` |
-| Rewritten body | Still valid JSON |
+| On a match | `max_tokens` becomes 0 |
 
-Residual risk: a user message whose last block contains the exact marker-plus-first-sentence string (for example, pasting the whole wake text) would still match.
+Residual risk: typing `[cc-cache-keepalive:v1]` verbatim in your own last message gets an empty reply for that request; resend without it.
 
-Not verified: it has not yet been tested in a live Claude Code session how Claude Code handles the empty `max_tokens` response (whether it shows an error, retries, or still fires the next Stop hook), or whether the prompt cache is still hit after a `max_tokens: 0` wake. The latter depends on where Claude Code places `cache_control` and how it records the empty reply in history.
+Not verified:
+
+- How Claude Code handles the empty `max_tokens: 0` response (error, retry, or whether the next Stop hook still fires).
+- Whether the prompt cache still hits afterwards.
+- The rule has not been run against a live GPROXY.
 
 ## Tests
 

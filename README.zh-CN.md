@@ -212,7 +212,7 @@ node install.mjs --any-model   # 想切回默认，不带这个参数再运行�
 
 各项阈值是脚本顶部的常量，直接在脚本里改：`FIRE_AFTER_MS`（270 秒）、`STALE_MS`、`MAX_WAKES`、`CAP_MS`、`SHELL_MAX_AGE_MS`、`PERSISTENT_PATTERNS`。
 
-唤醒语是中文，要求模型回复"保活"。想换语言就改 `WAKE_MESSAGE`。如果用下面的 GPROXY 规则，`KEEPALIVE_MARKER` 和第一句 `自动缓存保活唤醒。` 都不要改，或者同步修改规则。
+唤醒语是中文，要求模型回复"保活"。想换语言就改 `WAKE_MESSAGE`。如果用下面的 GPROXY 规则，`KEEPALIVE_MARKER` 不要改，唤醒语的其余部分可以随意修改。
 
 下面这些环境变量供测试使用：
 
@@ -232,51 +232,51 @@ Anthropic Messages API 支持用 `max_tokens: 0` [预热缓存](https://platform
 
 这是可选的。hook 本身不依赖 GPROXY；不用 GPROXY 时，模型照常回复"保活"。
 
-规则：
+需要 GPROXY [1617792](https://github.com/LeenHawk/gproxy/commit/1617792ee70943a35c009c2cd7a7aae0adf96413) 或更新版本，该版本起 `filterBody` 可以写 [JMESPath 表达式](https://github.com/LeenHawk/gproxy/blob/1617792ee70943a35c009c2cd7a7aae0adf96413/docs/src/content/docs/zh-cn/guides/rules.md)（见"JMESPath 表达式"一节）。规则：
 
 ```json
 {
-  "action": "replace",
+  "action": "set",
   "phase": "request",
   "target": "body",
-  "pattern": "(?s)(\"max_tokens\"\\s*:\\s*)[0-9]+(\\s*,\\s*\"messages\"\\s*:\\s*\\[.*\\{\\s*\"type\"\\s*:\\s*\"text\"\\s*,\\s*\"text\"\\s*:\\s*\"(?:[^\"\\\\]|\\\\.)*\\[cc-cache-keepalive:v1\\] 自动缓存保活唤醒。(?:[^\"\\\\]|\\\\.)*\"\\s*(?:,\\s*\"cache_control\"\\s*:\\s*\\{[^{}]*\\})?\\s*\\}\\s*\\]\\s*\\}\\s*\\]\\s*,\\s*\"model\")",
-  "replacement": "${1}0${2}",
+  "paths": ["max_tokens"],
+  "pattern": "",
+  "replacement": "0",
   "filterOperationKeys": [
     { "operation": "generate_content", "dialect": "claude" },
     { "operation": "stream_generate_content", "dialect": "claude" }
   ],
+  "filterBody": "(type(messages[-1].content) == 'string' && contains(messages[-1].content, '[cc-cache-keepalive:v1]')) || (type(messages[-1].content) == 'array' && length(messages[-1].content[?type(text) == 'string' && contains(text, '[cc-cache-keepalive:v1]')]) > `0`)",
   "enabled": true
 }
 ```
 
 适用范围：
 
-- GPROXY 在转换成上游协议之后才应用改写规则，它当前的 Claude wire 结构体把 `max_tokens` 紧挨着序列化在 `messages` 前面（[源码](https://github.com/LeenHawk/gproxy/blob/edecf51f204ea499d301c812e5d56b259910ed4c/crates/gproxy-protocol/src/wire/claude/generate_content.rs#L17-L24)）。
-- 正则只在同时满足下面三条时匹配：
-  - 标记加固定的第一句 `[cc-cache-keepalive:v1] 自动缓存保活唤醒。` 位于某个 `{"type":"text","text":...}` 块的同一个 JSON 字符串里。
-  - 该块是最后一条消息的最后一个块。
-  - 它之后 `messages` 随即闭合，紧接着是 `"model"`，这是 GPROXY 当前的字段顺序。
+- 只有 `filterBody` 返回布尔 `true` 时才执行动作。类型错误、未知函数、其他求值错误和非布尔结果都不会触发，表达式在保存时会被校验。
+- 只检查 `messages[-1]`，所以留在历史里的标记不会让之后的请求匹配。
+- 字符串形式的 `content` 直接搜索。Claude Code 把 Stop hook 的反馈记成一条 `content` 为纯字符串的 user 消息，标记前面可能还有别的文字。
+- 块数组形式的 `content`（加上 `cache_control` 后线上形式可能变成这样）只搜索 `text` 字段是字符串的块，所以不会深入 `tool_result` 的内容。
 
-  标记前面允许有别的文字，因为 Claude Code 会给 hook 的 stderr 加自己的前缀。旧的保活消息会留在历史里，所以出现在更早消息里的标记不能匹配。tool_result 不会匹配：它内部的 text 块之后，在 `messages` 结束前还有更多闭合符。
-- GPROXY 结构化的 `filterBody` 目前没有"数组最后一个元素包含"这类选择器（[文档](https://github.com/LeenHawk/gproxy/blob/edecf51f204ea499d301c812e5d56b259910ed4c/docs/src/content/docs/zh-cn/guides/rules.md#L99-L106)），所以用 body 正则。
-- 它依赖 GPROXY 当前的序列化布局，不是协议保证。布局变了，或 Claude Code 在 hook 文本之后追加了别的块，规则就不匹配，请求原样透传。
-
-正则的预期行为：
+预期行为：
 
 | 情形 | 结果 |
 |---|---|
-| 标记在当前最后一条 user 消息里 | 匹配，`max_tokens` 改为 0 |
-| 最后一个 text 块带 `cache_control` | 仍然匹配 |
-| 标记只在历史里，后面还有 assistant/user 消息 | 必须不匹配 |
-| 不含标记的普通 Claude 请求 | 必须不匹配 |
-| 最后一条消息里的 tool_result 含标记文本 | 必须不匹配 |
-| 用户自己的最后一条消息只提到了标记 | 必须不匹配 |
+| 最后一条消息里有标记，`content` 是字符串（带 hook 包装） | 匹配 |
+| 最后一条消息的某个 text 块里有标记，块数组形式，带或不带 `cache_control` | 匹配 |
+| 标记只在历史里，后面还有消息 | 必须不匹配 |
+| 不含标记的普通请求 | 必须不匹配 |
+| 标记只出现在最后一条消息的 `tool_result` 里 | 必须不匹配 |
 | Codex / Gemini / 其他方言 | 被 `filterOperationKeys` 排除 |
-| 改写后的 body | 仍是合法 JSON |
+| 匹配时 | `max_tokens` 变为 0 |
 
-残余风险：用户消息的最后一个块里若含有完全一致的"标记加第一句"字符串（例如整段粘贴唤醒语），仍会匹配。
+残余风险：在自己的最后一条消息里原样输入 `[cc-cache-keepalive:v1]`，这次请求会得到空回复；去掉标记重发即可。
 
-尚未验证：还没在真实的 Claude Code 会话里测过它如何处理 `max_tokens` 为 0 的空响应（会报错、重试，还是照常触发下一次 Stop hook），也没验证 `max_tokens: 0` 唤醒之后提示缓存是否仍能命中。后者取决于 Claude Code 把 `cache_control` 放在哪里，以及它如何把这条空回复记进历史。
+尚未验证：
+
+- Claude Code 如何处理 `max_tokens: 0` 的空响应（报错、重试，还是下一次 Stop hook 是否仍会触发）。
+- 之后提示缓存是否仍能命中。
+- 规则还没在真实的 GPROXY 上跑过。
 
 ## 测试
 
