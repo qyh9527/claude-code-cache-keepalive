@@ -205,7 +205,7 @@ Common `reason` values in the log:
 
 Thresholds are constants near the top of the script: `FIRE_AFTER_MS` (270 s), `STALE_MS`, `MAX_WAKES`, `CAP_MS`, `SHELL_MAX_AGE_MS`, and `PERSISTENT_PATTERNS`. Edit them there.
 
-The wake message is in Chinese and asks the model to reply `保活`. To change the language, edit `wakeMessage`.
+The wake message is in Chinese and asks the model to reply `保活`. To change the language, edit `WAKE_MESSAGE`. If you use the GPROXY rule below, keep both `KEEPALIVE_MARKER` and the first sentence `自动缓存保活唤醒。` unchanged, or edit the rule to match.
 
 These environment variables exist for tests:
 
@@ -216,6 +216,60 @@ These environment variables exist for tests:
 | `CACHE_KEEPALIVE_SETTLE_S` | Initial settle delay |
 | `CACHE_KEEPALIVE_FIRE_AFTER_S` | Seconds after the anchor at which to fire |
 | `CACHE_KEEPALIVE_TEST_THROW` | Triggers a simulated async crash |
+
+## Optional: rewrite keepalive requests to `max_tokens: 0` with GPROXY
+
+Anthropic's Messages API accepts `max_tokens: 0` for [cache pre-warming](https://platform.claude.com/docs/en/build-with-claude/prompt-caching#pre-warming-the-cache): it writes the cache at the `cache_control` breakpoints, returns an empty `content` array with `stop_reason: "max_tokens"`, and bills zero output tokens. With [GPROXY](https://github.com/LeenHawk/gproxy) in front of a Claude upstream, one rewrite rule can apply this to keepalive requests only.
+
+Every wake sends the same text, starting with `[cc-cache-keepalive:v1]`. The wake count lives only in the log and state file. If the hook/gateway contract changes, the suffix becomes `v2` and old rules stop matching (fail closed).
+
+This is optional. The hook has no GPROXY dependency, and without GPROXY the model still replies `保活`.
+
+The rule:
+
+```json
+{
+  "action": "replace",
+  "phase": "request",
+  "target": "body",
+  "pattern": "(?s)(\"max_tokens\"\\s*:\\s*)[0-9]+(\\s*,\\s*\"messages\"\\s*:\\s*\\[.*\\{\\s*\"type\"\\s*:\\s*\"text\"\\s*,\\s*\"text\"\\s*:\\s*\"(?:[^\"\\\\]|\\\\.)*\\[cc-cache-keepalive:v1\\] 自动缓存保活唤醒。(?:[^\"\\\\]|\\\\.)*\"\\s*(?:,\\s*\"cache_control\"\\s*:\\s*\\{[^{}]*\\})?\\s*\\}\\s*\\]\\s*\\}\\s*\\]\\s*,\\s*\"model\")",
+  "replacement": "${1}0${2}",
+  "filterOperationKeys": [
+    { "operation": "generate_content", "dialect": "claude" },
+    { "operation": "stream_generate_content", "dialect": "claude" }
+  ],
+  "enabled": true
+}
+```
+
+Scope:
+
+- GPROXY applies rewrite rules after converting to the upstream protocol, and its current Claude wire struct serializes `max_tokens` right before `messages` ([source](https://github.com/LeenHawk/gproxy/blob/edecf51f204ea499d301c812e5d56b259910ed4c/crates/gproxy-protocol/src/wire/claude/generate_content.rs#L17-L24)).
+- The regex only matches when all of these hold:
+  - The marker plus the fixed first sentence, `[cc-cache-keepalive:v1] 自动缓存保活唤醒。`, sits inside one JSON string of a `{"type":"text","text":...}` block.
+  - That block is the last block of the last message.
+  - `messages` closes right after it and `"model"` follows, which is GPROXY's current field order.
+
+  Text before the marker is allowed, since Claude Code wraps hook stderr in its own prefix. Old keepalive messages stay in history, so a marker in an earlier message must not match. Tool results can't match because a tool_result's inner text block is followed by more closers before `messages` ends.
+- GPROXY's structured `filterBody` has no "last array element contains" selector yet ([docs](https://github.com/LeenHawk/gproxy/blob/edecf51f204ea499d301c812e5d56b259910ed4c/docs/src/content/docs/zh-cn/guides/rules.md#L99-L106)), which is why this is a body regex.
+- It depends on GPROXY's current serialization layout, not on a protocol guarantee. If the layout changes, or Claude Code appends other blocks after the hook text, the rule simply doesn't match and the request goes through unchanged.
+
+Expected behavior of the regex:
+
+| Case | Result |
+|---|---|
+| Marker in the current last user message | Matches, `max_tokens` becomes 0 |
+| Last text block carries `cache_control` | Still matches |
+| Marker only in history, followed by more assistant/user messages | Must not match |
+| Normal Claude request without the marker | Must not match |
+| Marker text inside a tool_result in the last message | Must not match |
+| A user's own last message mentioning just the marker | Must not match |
+| Codex / Gemini / other dialects | Excluded by `filterOperationKeys` |
+| Rewritten body | Still valid JSON |
+
+Residual risk: a user message whose last block contains the exact marker-plus-first-sentence string (for example, pasting the whole wake text) would still match.
+
+Not verified: it has not yet been tested in a live Claude Code session how Claude Code handles the empty `max_tokens` response (whether it shows an error, retries, or still fires the next Stop hook), or whether the prompt cache is still hit after a `max_tokens: 0` wake. The latter depends on where Claude Code places `cache_control` and how it records the empty reply in history.
 
 ## Tests
 

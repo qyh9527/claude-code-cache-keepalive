@@ -77,8 +77,10 @@ const SUBAGENT_MODEL = typeof process.env.CLAUDE_CODE_SUBAGENT_MODEL === 'string
   : '';
 const ANY_MODEL = process.argv.slice(2).includes('--any-model');
 
-const wakeMessage = (n) =>
-  `[cache-keepalive] 后台任务仍在运行，这是自动缓存保活唤醒（第 ${n} 次）。` +
+// 唤醒语在线上可见的文本固定不变，方便网关按标记匹配；唤醒次数只写进状态与日志。契约有变就升级版本后缀。
+const KEEPALIVE_MARKER = '[cc-cache-keepalive:v1]';
+const WAKE_MESSAGE =
+  `${KEEPALIVE_MARKER} 自动缓存保活唤醒。` +
   `请只回复“保活”两个字，不要调用任何工具，不要输出任何其他内容。\n`;
 
 const nowIso = () => new Date().toISOString();
@@ -623,7 +625,7 @@ async function main() {
       periodAgeS: secs(lastWakeAt - periodStart),
       late,
     });
-    process.stderr.write(wakeMessage(wakes));
+    process.stderr.write(WAKE_MESSAGE);
     return 2;
   }
 }

@@ -9,7 +9,7 @@ import { fileURLToPath } from 'node:url';
 
 const SCRIPT = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'cache-keepalive.mjs');
 const ROOT = fs.mkdtempSync(path.join(os.tmpdir(), 'cache-keepalive-test-'));
-const WAKE1 = '[cache-keepalive] 后台任务仍在运行，这是自动缓存保活唤醒（第 1 次）。请只回复“保活”两个字，不要调用任何工具，不要输出任何其他内容。\n';
+const WAKE = '[cc-cache-keepalive:v1] 自动缓存保活唤醒。请只回复“保活”两个字，不要调用任何工具，不要输出任何其他内容。\n';
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const iso = (ms) => new Date(ms).toISOString();
 
@@ -80,8 +80,8 @@ const SUB = { id: 'a1', type: 'subagent', status: 'running' };
 
 const results = [];
 function check(name, ok, detail) { results.push({ name, ok: !!ok, detail }); }
-const brief = (r) => `exit=${r.code} ${r.secs}s reason=${r.last?.reason ?? r.last?.decision} ${r.err && r.err !== WAKE1 ? 'STDERR=' + JSON.stringify(r.err.slice(0, 120)) : ''}`;
-const isWake = (r) => r.code === 2 && r.err === WAKE1 && r.last?.decision === 'wake';
+const brief = (r) => `exit=${r.code} ${r.secs}s reason=${r.last?.reason ?? r.last?.decision} ${r.err && r.err !== WAKE ? 'STDERR=' + JSON.stringify(r.err.slice(0, 120)) : ''}`;
+const isWake = (r) => r.code === 2 && r.err === WAKE && r.last?.decision === 'wake';
 const isExit = (r, reason) => r.code === 0 && r.err === '' && r.last?.reason === reason;
 
 const cases = {
@@ -117,6 +117,16 @@ const cases = {
       const r = await run(c, inp(c, 's6', [SUB], { stop_hook_active: sha }), { CACHE_KEEPALIVE_FIRE_AFTER_S: '35' });
       check(`T6 F4 stop_hook_active=${sha}→${expect}`, expect === 'wake' ? isWake(r) && r.last.wakes === 1 : isExit(r, 'cap'), brief(r));
     }
+  },
+  async T6b() {
+    const c = mkCase('T6b');
+    const opts = { CACHE_KEEPALIVE_FIRE_AFTER_S: '35' };
+    const rA = await run(c, inp(c, 's6b', [SUB]), opts);
+    const rB = await run(c, inp(c, 's6b', [SUB], { stop_hook_active: true }), opts);
+    check('T6b 第 1、2 次唤醒的 stderr 逐字节相同，次数只在日志里',
+      isWake(rA) && rA.last.wakes === 1 && isWake(rB) && rB.last.wakes === 2 &&
+      rA.err === rB.err && rA.err.includes('[cc-cache-keepalive:v1]') && !rA.err.includes('第'),
+      `${brief(rA)} wakes=${rA.last?.wakes} | ${brief(rB)} wakes=${rB.last?.wakes}`);
   },
   async T7() {
     const c = mkCase('T7'); dbAdd(c.db, [{ session: 's7', startAgoMs: 2000 }]);
