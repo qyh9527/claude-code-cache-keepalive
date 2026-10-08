@@ -9,7 +9,7 @@ import { fileURLToPath } from 'node:url';
 
 const SCRIPT = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'cache-keepalive.mjs');
 const ROOT = fs.mkdtempSync(path.join(os.tmpdir(), 'cache-keepalive-test-'));
-const WAKE1 = '[cache-keepalive] 后台任务仍在运行，这是自动缓存保活唤醒（第 1 次）。请只回复“保活”两个字，不要调用任何工具，不要输出任何其他内容。\n';
+const WAKE1 = '[cache-keepalive] Background tasks are still running; this is an automatic cache keep-alive wake (#1). Reply with only the word "alive". Do not call any tools and do not output anything else.\n';
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const iso = (ms) => new Date(ms).toISOString();
 

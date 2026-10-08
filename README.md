@@ -21,7 +21,7 @@ On every `Stop`:
    - the cache has already expired (anchor older than 300 s);
    - the real upstream model is not Claude (for example, the proxy routes `claude-*` names to another provider), unless `--any-model` is set;
    - the idle period has reached its cap.
-4. **Wake the session.** Otherwise it writes one line to stderr asking the model to reply only `保活` ("keep alive"), without calling any tools, and exits with code 2. That short turn reads the whole cached prefix and appends only a few tokens.
+4. **Wake the session.** Otherwise it writes one line to stderr asking the model to reply only `alive`, without calling any tools, and exits with code 2. That short turn reads the whole cached prefix and appends only a few tokens.
 
 The keepalive turn ends with another `Stop`, so the cycle repeats until the background task finishes or a cap is reached.
 
@@ -205,7 +205,7 @@ Common `reason` values in the log:
 
 Thresholds are constants near the top of the script: `FIRE_AFTER_MS` (270 s), `STALE_MS`, `MAX_WAKES`, `CAP_MS`, `SHELL_MAX_AGE_MS`, and `PERSISTENT_PATTERNS`. Edit them there.
 
-The wake message is in Chinese and asks the model to reply `保活`. To change the language, edit `wakeMessage`.
+The wake message is in English and asks the model to reply `alive`. To change the language, edit `wakeMessage`.
 
 These environment variables exist for tests:
 

@@ -26,7 +26,7 @@ hook 配置为 `asyncRewake: true`：它在后台运行，不阻塞 Claude Code�
    - 锚点已超过 300 秒，缓存已经过期；
    - 上游实际模型不是 Claude，比如代理把 `claude-*` 转发到了别家（设置了 `--any-model` 时不检查这一条）；
    - 本空闲期已经到达上限。
-4. **唤醒会话。** 以上条件都不成立时，往 stderr 写一句话，要求模型只回复"保活"、不调用任何工具，然后以 exit 2 退出。这一轮会读取整段缓存前缀，只追加几个 token。
+4. **唤醒会话。** 以上条件都不成立时，往 stderr 写一句话，要求模型只回复"alive"、不调用任何工具，然后以 exit 2 退出。这一轮会读取整段缓存前缀，只追加几个 token。
 
 保活这一轮结束时又会触发 `Stop`，如此循环，直到后台任务结束或达到上限。
 
@@ -212,7 +212,7 @@ node install.mjs --any-model   # 想切回默认，不带这个参数再运行�
 
 各项阈值是脚本顶部的常量，直接在脚本里改：`FIRE_AFTER_MS`（270 秒）、`STALE_MS`、`MAX_WAKES`、`CAP_MS`、`SHELL_MAX_AGE_MS`、`PERSISTENT_PATTERNS`。
 
-唤醒语是中文，要求模型回复"保活"。想换语言就改 `wakeMessage`。
+唤醒语是英文，要求模型回复"alive"。想换语言就改 `wakeMessage`。
 
 下面这些环境变量供测试使用：
 

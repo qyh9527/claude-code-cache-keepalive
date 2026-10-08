@@ -1,23 +1,29 @@
-// cache-keepalive.mjs — Claude Code Stop hook（asyncRewake）。
+// cache-keepalive.mjs — Claude Code Stop hook (asyncRewake).
 //
-// 目的：主会话在等后台任务时，prompt cache 的 5 分钟 TTL 会过期。本 hook 在后台睡到
-// 「锚点 + 270s」，若期间没有任何活动（transcript 没出现新条目、CC Switch 没有新的主会话
-// 请求），就写一句唤醒语到 stderr 并 exit 2，让空闲的主会话发一轮极短请求，把缓存续上。
+// Purpose: while the main session waits on background tasks, the prompt cache's 5-minute TTL
+// expires. This hook sleeps in the background until "anchor + 270s"; if nothing happened in the
+// meantime (no new transcript entries, no new main-session requests in CC Switch), it writes one
+// wake line to stderr and exits 2, so the idle main session sends a very short request that
+// refreshes the cache.
 //
-// 约定：exit 2 + stderr 一句话 = 唤醒；exit 0 = 静默退出；任何异常一律 exit 0。
-// 环境变量（测试用）：
-//   CACHE_KEEPALIVE_DIR（状态与日志目录）/ CACHE_KEEPALIVE_DB（cc-switch 库路径）
+// Contract: exit 2 + one line on stderr = wake; exit 0 = quiet exit; any error always exits 0.
+// Environment variables (for tests):
+//   CACHE_KEEPALIVE_DIR (state and log directory) / CACHE_KEEPALIVE_DB (cc-switch database path)
 //   CACHE_KEEPALIVE_SETTLE_S / CACHE_KEEPALIVE_FIRE_AFTER_S
-// 子代理模型可用 CLAUDE_CODE_SUBAGENT_MODEL 排除，避免它的请求被当成主会话请求。
-// 按次指定的子代理模型（Agent 调用里的 model 参数）靠 transcript 里主会话最后一条 assistant 的
-// message.model 过滤库里的 model 列；已知限制：子代理与主会话同模型时无法区分。
+// The subagent model can be excluded via CLAUDE_CODE_SUBAGENT_MODEL so its requests are not
+// mistaken for main-session requests.
+// Per-call subagent models (the model parameter of an Agent call) are filtered by matching the
+// database model column against message.model of the main session's last assistant entry in the
+// transcript; known limitation: a subagent using the same model as the main session cannot be told apart.
 //
-// 命令行参数：
-//   --any-model  不限 Claude 系列：主会话请求不再要求模型名像 Claude，上游是任何模型都保活。
-//                适合其他也有短 TTL prompt cache 的上游；默认只对 Claude 生效。
+// Command-line arguments:
+//   --any-model  Not limited to the Claude family: main-session requests no longer need a
+//                Claude-like model name, and any upstream model is kept alive.
+//                Useful for other upstreams that also have a short-TTL prompt cache; by default
+//                only Claude is covered.
 //
-// 只用 Node 内置模块。node:sqlite 会发出 ExperimentalWarning，而 exit 2 时 stderr
-// 会原样交给模型，所以先摘掉 warning 监听再动态 import。
+// Uses only Node built-in modules. node:sqlite emits an ExperimentalWarning, and on exit 2 stderr
+// is passed to the model verbatim, so the warning listeners are removed before the dynamic import.
 
 process.removeAllListeners('warning');
 
@@ -38,21 +44,21 @@ function numEnv(name, fallback) {
 const SETTLE_MS = numEnv('CACHE_KEEPALIVE_SETTLE_S', 8) * 1000;
 const FIRE_AFTER_MS = numEnv('CACHE_KEEPALIVE_FIRE_AFTER_S', 270) * 1000;
 
-const SAME_PERIOD_MS = 180000;      // 距上次唤醒 <3min 且 stop_hook_active=true 才视作同一空闲期续跑
-const CAP_MS = 60 * 60 * 1000;      // 单个空闲期最长 60 分钟
-const MAX_WAKES = 8;                // 单个空闲期最多 8 次唤醒（对齐 Claude Code 连续 8 次 stop hook 续跑上限）
-const GUARD_MS = 330 * 1000;        // hook 配置 timeout 360s，留 30s 余量
-const ANCHOR_FALLBACK_MS = 30000;   // 查不到库时的兜底锚点：Stop 前 30 秒
-const STALE_MS = 300000;            // 锚点比现在旧超过 5 分钟就不再唤醒（缓存早过期了）
-const SHELL_MAX_AGE_MS = 20 * 60 * 1000; // shell 任务存活超过 20 分钟视为常驻，不再保活
-const TRANSCRIPT_TAIL_BYTES = 256 * 1024; // transcript 活动检测只看最后 256KB
-const TRANSCRIPT_LAG_MS = 2000;     // 仅 assistant 留 2s，容忍本轮 Stop 的延迟写入；新 user 立即算活动
-const LOG_MAX_BYTES = 1024 * 1024;  // 日志超过 1MB 就轮转
+const SAME_PERIOD_MS = 180000;      // continue the same idle period only if <3min since last wake and stop_hook_active=true
+const CAP_MS = 60 * 60 * 1000;      // a single idle period lasts at most 60 minutes
+const MAX_WAKES = 8;                // at most 8 wakes per idle period (matches Claude Code's limit of 8 consecutive stop-hook continuations)
+const GUARD_MS = 330 * 1000;        // hook timeout is configured as 360s; keep a 30s margin
+const ANCHOR_FALLBACK_MS = 30000;   // fallback anchor when the database is unavailable: 30 seconds before Stop
+const STALE_MS = 300000;            // stop waking once the anchor is more than 5 minutes old (the cache has already expired)
+const SHELL_MAX_AGE_MS = 20 * 60 * 1000; // shell tasks alive for more than 20 minutes count as long-running; no keep-alive
+const TRANSCRIPT_TAIL_BYTES = 256 * 1024; // transcript activity detection only looks at the last 256KB
+const TRANSCRIPT_LAG_MS = 2000;     // 2s grace for assistant entries only, tolerating this turn's late Stop writes; a new user entry counts as activity immediately
+const LOG_MAX_BYTES = 1024 * 1024;  // rotate the log once it exceeds 1MB
 
 const TASK_TYPES = new Set(['subagent', 'shell', 'workflow']);
 const ACTIVE_STATUSES = new Set(['running', 'pending']);
 
-// shell 任务命中了这些模式 = 常驻进程（dev server / watch / tail -f 之类），不保活。
+// A shell task matching these patterns = long-running process (dev server / watch / tail -f, etc.); no keep-alive.
 const PERSISTENT_PATTERNS = [
   /\b(npm|pnpm|yarn|bun)\s+(run\s+)?(dev|start|serve|watch|preview)\b/i,
   /\b(vite|nodemon|http-server|live-server|uvicorn|jupyter)\b/i,
@@ -68,7 +74,7 @@ const PERSISTENT_PATTERNS = [
   /\btail\s+-f\b/i,
   /\bGet-Content\b.*\s-Wait\b/i,
 ];
-// docker compose up 是常驻的，但带 -d/--detach 会立刻返回，分两步判断（不用环视）。
+// docker compose up is long-running, but with -d/--detach it returns immediately; checked in two steps (no lookarounds).
 const DOCKER_UP_RE = /\bdocker(\s+compose|-compose)\s+up\b/i;
 const DOCKER_DETACH_RE = /(^|\s)-d(\s|$)|--detach\b/i;
 
@@ -78,26 +84,26 @@ const SUBAGENT_MODEL = typeof process.env.CLAUDE_CODE_SUBAGENT_MODEL === 'string
 const ANY_MODEL = process.argv.slice(2).includes('--any-model');
 
 const wakeMessage = (n) =>
-  `[cache-keepalive] 后台任务仍在运行，这是自动缓存保活唤醒（第 ${n} 次）。` +
-  `请只回复“保活”两个字，不要调用任何工具，不要输出任何其他内容。\n`;
+  `[cache-keepalive] Background tasks are still running; this is an automatic cache keep-alive wake (#${n}). ` +
+  `Reply with only the word "alive". Do not call any tools and do not output anything else.\n`;
 
 const nowIso = () => new Date().toISOString();
 const secs = (ms) => Math.round(ms / 10) / 100;
 const sleep = (ms) => new Promise((r) => setTimeout(r, Math.max(0, ms)));
 const safeSessionName = (s) => s.replace(/[^A-Za-z0-9._-]/g, '_');
 
-// —— 日志：只写数值与枚举，绝不写 last_assistant_message / description / command ——
+// —— Logging: only numbers and enums, never last_assistant_message / description / command ——
 function log(rec) {
   try {
     fs.mkdirSync(STATE_DIR, { recursive: true });
     try {
       if (fs.statSync(LOG_FILE).size > LOG_MAX_BYTES) fs.renameSync(LOG_FILE, LOG_ROTATED);
     } catch {
-      /* 没有旧日志或轮转失败：忽略 */
+      /* no previous log or rotation failed: ignore */
     }
     fs.appendFileSync(LOG_FILE, JSON.stringify(rec) + '\n');
   } catch {
-    /* 日志失败不能影响主流程 */
+    /* logging failures must not affect the main flow */
   }
 }
 
@@ -124,7 +130,7 @@ function readStdin() {
   });
 }
 
-// —— 状态文件 / 任务文件：都是「写临时文件再 rename」 ——
+// —— State file / tasks file: both "write a temp file, then rename" ——
 function readJsonFile(p, fallback) {
   try {
     const v = JSON.parse(fs.readFileSync(p, 'utf8'));
@@ -138,21 +144,23 @@ function writeJsonFile(p, obj) {
   fs.mkdirSync(STATE_DIR, { recursive: true });
   const tmp = `${p}.${process.pid}.${crypto.randomBytes(4).toString('hex')}.tmp`;
   fs.writeFileSync(tmp, JSON.stringify(obj));
-  fs.renameSync(tmp, p); // Windows 上 rename 覆盖已存在文件
+  fs.renameSync(tmp, p); // on Windows, rename overwrites an existing file
 }
 
 function deleteFile(p) {
   try { fs.rmSync(p, { force: true }); } catch { /* ignore */ }
 }
 
-// —— CC Switch 请求起点：每次查询开一个只读连接，查完立刻 close ——
-// 过滤主会话请求：request_model 含 claude/opus/sonnet/fable（兼容 CC/claude-… 这类带前缀的名字）
-// 且不是 haiku 旁路；若知道子代理模型名，再排掉它。--any-model 时不要求模型名像 Claude。
-// okOnly=true 只取 status_code=200 的成功请求：502 等失败请求没到上游，不会刷新缓存，
-// 不能当锚点。判断「会话是否恢复活动」时则用 okOnly=false，任何状态的请求都算活动。
+// —— CC Switch request start: open a read-only connection per query and close it right after ——
+// Main-session request filter: request_model contains claude/opus/sonnet/fable (also matching
+// prefixed names like CC/claude-…) and is not a haiku side request; if the subagent model name is
+// known, exclude it too. With --any-model the model name does not need to look like Claude.
+// okOnly=true takes only successful requests with status_code=200: failed requests such as 502 never
+// reached the upstream, did not refresh the cache, and cannot serve as an anchor. When checking
+// whether the session has resumed activity, okOnly=false is used and requests of any status count.
 let sqliteModule = null;
-// 返回 { start, model } 或 null；model 是上游真实模型名（CC Switch 切到非 Claude 供应商时会变）
-// mainModel（可选）：主会话模型，非空时只取上游模型 model 列与它相等的行，排除按次指定模型的子代理请求。
+// Returns { start, model } or null; model is the real upstream model name (it changes when CC Switch switches to a non-Claude provider)
+// mainModel (optional): the main-session model; when non-empty, only rows whose upstream model column equals it are taken, excluding subagent requests with a per-call model.
 async function queryLatestRow(sessionId, { okOnly = false, mainModel = null } = {}) {
   let db = null;
   try {
@@ -185,7 +193,7 @@ async function queryLatestRow(sessionId, { okOnly = false, mainModel = null } = 
       model: row.model != null ? String(row.model) : null,
     };
   } catch {
-    return null; // 库不存在 / 表不存在 / 锁冲突 → 交给 fallback
+    return null; // database missing / table missing / lock conflict → handled by the fallback
   } finally {
     if (db !== null) {
       try { db.close(); } catch { /* ignore */ }
@@ -193,14 +201,15 @@ async function queryLatestRow(sessionId, { okOnly = false, mainModel = null } = 
   }
 }
 
-// 上游不是 Claude（例如切到 DeepSeek）就没有 5 分钟缓存问题，保活是白花钱。
+// A non-Claude upstream (e.g. switched to DeepSeek) has no 5-minute cache problem; keep-alive would just waste money.
 const CLAUDE_MODEL_RE = /claude|opus|sonnet|fable/i;
 const looksClaudeModel = (m) => typeof m === 'string' && CLAUDE_MODEL_RE.test(m);
 const upstreamAllowed = (m) => ANY_MODEL || looksClaudeModel(m);
 
-// —— transcript 活动检测 ——
-// 只看 mtime/size 变化不够，Stop 自己也会写 assistant + system/stop_hook_summary（时间戳
-// ≈ Stop 时刻），那不是「会话恢复」。所以尾巴里必须有一行时间戳晚于 hookStart+2s 的条目。
+// —— Transcript activity detection ——
+// Watching mtime/size changes alone is not enough: Stop itself writes assistant + system/stop_hook_summary
+// entries (timestamped ≈ the Stop moment), which is not "the session resumed". So the tail must
+// contain an entry whose timestamp is later than hookStart+2s.
 function snapshotFile(p) {
   try {
     const st = fs.statSync(p);
@@ -219,7 +228,7 @@ function parseTsMs(t) {
   return null;
 }
 
-// 读取有界尾部，返回完整 JSONL 行与首个被覆盖的字节位置；读不了返回 null。
+// Reads a bounded tail; returns the complete JSONL lines and the first covered byte offset; returns null if unreadable.
 function readTranscriptTail(p, size) {
   let text;
   let start = 0;
@@ -262,12 +271,13 @@ function parseJsonLine(line) {
   }
 }
 
-// 只有主会话自己的 user / assistant 条目才代表「会话开了新一轮」。queue-operation（后台任务通知
-// 入队又立刻移除）、attachment、system、pr-link 等都不是；子代理（isSidechain）的条目也不是。
+// Only the main session's own user / assistant entries mean "the session started a new turn". queue-operation
+// (background task notifications enqueued and immediately removed), attachment, system, pr-link, etc. do not;
+// nor do subagent (isSidechain) entries.
 const isMainTurnEntry = (o) => (o.type === 'user' || o.type === 'assistant') && o.isSidechain !== true;
 
-// 主会话模型：transcript 尾部最后一条主会话 assistant 的 message.model；取不到返回 null。
-// 跳过 Claude Code 自己合成的 "<synthetic>" 占位模型。
+// Main-session model: message.model of the last main-session assistant entry in the transcript tail; null if unavailable.
+// Skips the "<synthetic>" placeholder model that Claude Code generates itself.
 function readMainModel(p) {
   const cur = snapshotFile(p);
   if (cur === null) return null;
@@ -283,7 +293,7 @@ function readMainModel(p) {
   return null;
 }
 
-// 返回 'idle' | 'active' | 'unreadable'
+// Returns 'idle' | 'active' | 'unreadable'
 function checkTranscript(p, snap, hookStart) {
   const cur = snapshotFile(p);
   if (cur === null) return 'unreadable';
@@ -297,7 +307,7 @@ function checkTranscript(p, snap, hookStart) {
     if (ms === null) continue;
     if (o.type === 'user' ? ms >= hookStart : ms > hookStart + TRANSCRIPT_LAG_MS) return 'active';
   }
-  // 新增区间有字节落在读取窗口外，或文件被改写而无法覆盖全量：不能安全断言空闲。
+  // Some newly added bytes fall outside the read window, or the file was rewritten and cannot be fully covered: idle cannot be safely asserted.
   if (tail.firstByte > snap.size || (cur.size <= snap.size && tail.firstByte > 0)) return 'unreadable';
   return 'idle';
 }
@@ -308,8 +318,8 @@ function isPersistentCommand(text) {
   return false;
 }
 
-// —— 活跃任务筛选（含 shell 常驻判定与 20 分钟存活上限）——
-// tasksFilePath 记录 shell 任务首次出现时间，只保留本次 background_tasks 里出现过的 id。
+// —— Active task selection (including the shell long-running check and the 20-minute age cap) ——
+// tasksFilePath records when each shell task was first seen, keeping only ids present in this background_tasks.
 function selectActiveTasks(tasks, tasksFilePath, hookStart) {
   const ignored = [];
   const prevSeen = readJsonFile(tasksFilePath, {});
@@ -354,14 +364,14 @@ function selectActiveTasks(tasks, tasksFilePath, hookStart) {
 let SESSION = null;
 let LOGGED_ERROR = false;
 
-// 兜底：任何未捕获异常也要留下日志，并且绝不能以 exit 2 去唤醒会话
+// Last resort: any uncaught exception must still leave a log entry and must never wake the session with exit 2
 function emergencyLog(reason) {
   if (LOGGED_ERROR) return;
   LOGGED_ERROR = true;
   try {
     log({ ts: nowIso(), session: SESSION, decision: 'error', reason: String(reason).slice(0, 200) });
   } catch {
-    /* 连日志都写不了就算了 */
+    /* if even logging fails, give up */
   }
 }
 process.on('uncaughtException', (err) => {
@@ -404,10 +414,10 @@ async function main() {
   const statePath = path.join(STATE_DIR, `${baseName}.json`);
   const tasksPath = path.join(STATE_DIR, `${baseName}.tasks.json`);
 
-  // 1. 是否有活跃任务（subagent / shell / workflow，status running|pending；shell 另有常驻与存活判定）
+  // 1. Any active tasks? (subagent / shell / workflow with status running|pending; shell also gets the long-running and age checks)
   const { active, ignored } = selectActiveTasks(tasks, tasksPath, hookStart);
   if (active.length === 0) {
-    // 没有活跃任务：顺手删掉本会话状态，让还在睡眠的旧实例醒来后判定为 superseded
+    // No active tasks: also delete this session's state so an older instance still sleeping wakes up as superseded
     deleteFile(statePath);
     log({
       ts: nowIso(),
@@ -421,7 +431,7 @@ async function main() {
     return 0;
   }
 
-  // 2. 状态文件：只有 stop_hook_active=true 且距上次唤醒 <3min 才算同一空闲期的续跑
+  // 2. State file: it only continues the same idle period when stop_hook_active=true and <3min since the last wake
   const prev = readJsonFile(statePath, null);
   let periodStart = hookStart;
   let wakes = 0;
@@ -462,7 +472,7 @@ async function main() {
     return 0;
   }
 
-  // 3. transcript 快照（settle 之前定基线）
+  // 3. Transcript snapshot (baseline taken before settling)
   const transcriptPath =
     typeof input.transcript_path === 'string' && input.transcript_path ? input.transcript_path : null;
   const snap = transcriptPath !== null ? snapshotFile(transcriptPath) : null;
@@ -471,8 +481,8 @@ async function main() {
     return 0;
   }
 
-  // 4. 锚点（只认成功的主会话请求）
-  // 主会话模型 Stop 时读一次：最后一轮主回复此刻已写入 transcript
+  // 4. Anchor (only successful main-session requests count)
+  // Read the main-session model once at Stop: the last main reply is already in the transcript by now
   const mainModel = readMainModel(transcriptPath);
   ctx.mainModel = mainModel;
   let anchor;
@@ -488,10 +498,10 @@ async function main() {
     anchorSource = 'fallback';
   }
 
-  // 5. settle 后重查锚点（Stop 时最后一个请求可能还没写进库），再判断锚点是否已过期
+  // 5. Re-query the anchor after settling (the last request at Stop may not be in the database yet), then check whether the anchor is stale
   await sleep(SETTLE_MS);
   if (process.env.CACHE_KEEPALIVE_TEST_THROW) {
-    // 仅测试用：模拟异步崩溃，验证 uncaughtException 兜底会写日志并 exit 0
+    // Test only: simulate an async crash to verify the uncaughtException fallback logs and exits 0
     setTimeout(() => { throw new Error('test-throw-async'); }, 5);
     await sleep(50);
   }
@@ -515,7 +525,7 @@ async function main() {
     }
   }
 
-  // 6. 等到目标时刻决断
+  // 6. Wait until the target time, then decide
   const guardAt = hookStart + GUARD_MS;
   let late = false;
   for (;;) {
@@ -534,14 +544,14 @@ async function main() {
     ctx.anchorSource = anchorSource;
     ctx.late = late;
 
-    // a. 被同会话的新一轮 Stop 接管
+    // a. Taken over by a newer Stop in the same session
     const st = readJsonFile(statePath, null);
     if (!st || st.owner !== owner) {
       log({ ...stamp(), decision: 'exit', reason: 'superseded', anchorAgeS: secs(Date.now() - anchor) });
       return 0;
     }
 
-    // b. transcript 出现新条目 → 会话本来就活跃
+    // b. New transcript entries → the session is already active
     const tr = checkTranscript(transcriptPath, snap, hookStart);
     if (tr === 'unreadable') {
       log({ ...stamp(), decision: 'exit', reason: 'transcript-unreadable', anchorAgeS: secs(Date.now() - anchor) });
@@ -552,22 +562,22 @@ async function main() {
       return 0;
     }
 
-    // c. 库里有新请求：先看「任何状态」（失败请求也算活动），再单独看成功请求是否推进锚点
+    // c. New requests in the database: first check requests of any status (failed ones count as activity), then separately check whether a successful request moves the anchor
     const anyRow = await queryLatestRow(session, { okOnly: false, mainModel });
     if (anyRow !== null && anyRow.start > hookStart) {
       log({ ...stamp(), decision: 'exit', reason: 'activity-ccswitch', anchorSource, anchorAgeS: secs(Date.now() - anchor) });
       return 0;
     }
     const okRow = await queryLatestRow(session, { okOnly: true, mainModel });
-    // 兜底锚点只是估算：查到真实成功请求就无条件采用；已有真实锚点时只接受更晚的请求
+    // The fallback anchor is only an estimate: adopt a real successful request unconditionally; with a real anchor, accept only later requests
     if (okRow !== null && (anchorSource === 'fallback' || okRow.start > anchor)) {
-      anchor = okRow.start; // Stop 前发出、晚写入库的成功请求：锚点前移，重新计时
+      anchor = okRow.start; // a successful request sent before Stop but written to the database late: move the anchor forward and restart the timer
       anchorModel = okRow.model;
       anchorSource = 'ccswitch';
       ctx.anchorSource = anchorSource;
       ctx.upstreamModel = anchorModel;
       ctx.anchorAgeS = secs(Date.now() - anchor);
-      if (!upstreamAllowed(anchorModel)) { // 新的一行也要确认上游仍是 Claude（--any-model 时不限）
+      if (!upstreamAllowed(anchorModel)) { // the new row must also confirm the upstream is still Claude (unrestricted with --any-model)
         log({ ...stamp(), decision: 'exit', reason: 'non-claude-model' });
         return 0;
       }
@@ -578,14 +588,14 @@ async function main() {
       continue;
     }
 
-    // d. 重新确认上限
+    // d. Re-check the caps
     const nowD = Date.now();
     if (nowD - periodStart >= CAP_MS || wakes >= MAX_WAKES) {
       log({ ...stamp(), decision: 'exit', reason: 'cap', periodAgeS: secs(nowD - periodStart), wakes });
       return 0;
     }
 
-    // e. 决断：唤醒前把 guard / 锚点新鲜度 / owner / transcript 全部紧挨着再确认一次
+    // e. Decide: right before waking, re-confirm guard / anchor freshness / owner / transcript back to back
     const nowE = Date.now();
     if (nowE >= guardAt) {
       log({ ...stamp(), decision: 'exit', reason: 'timeout-guard', anchorSource, anchorAgeS: secs(nowE - anchor), late });
@@ -639,7 +649,7 @@ try {
   code = 0;
 }
 if (code === 2) {
-  process.exitCode = 2; // 让事件循环自然收尾，别用 process.exit 截断 stderr
+  process.exitCode = 2; // let the event loop wind down naturally; process.exit would truncate stderr
 } else {
   process.exit(0);
 }
