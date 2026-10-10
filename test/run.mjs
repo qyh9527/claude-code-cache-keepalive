@@ -1,6 +1,7 @@
 // cache-keepalive.mjs 回归测试：每个用例独立的状态目录 / transcript / 迷你 sqlite 库，并行运行。
 // 用法：node test/run.mjs（需要 Node 22.13+，不读写真实的 CC Switch 库和日志目录）
 import { spawn } from 'node:child_process';
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
@@ -43,20 +44,26 @@ function mainTranscript(c) {
 }
 function dbInit(file) {
   const db = new DatabaseSync(file);
-  db.exec('create table if not exists proxy_request_logs (session_id text, model text, request_model text, status_code integer, created_at integer, latency_ms integer)');
+  db.exec('create table if not exists proxy_request_logs (request_id text, session_id text, model text, request_model text, status_code integer, created_at integer, latency_ms integer)');
   db.close();
 }
 // startAgoMs：请求开始距现在多久；created_at 取整秒，会让开始时间最多偏早 1 秒
+// id：CC Switch 4.0.6 的 request_id 形如 "session:<上游响应 id>"；不给时用不含响应 id 的随机串（同失败请求）
 function dbAdd(file, rows) {
   dbInit(file);
   const db = new DatabaseSync(file);
-  const st = db.prepare('insert into proxy_request_logs values (?,?,?,?,?,?)');
+  const st = db.prepare('insert into proxy_request_logs (request_id, session_id, model, request_model, status_code, created_at, latency_ms) values (?,?,?,?,?,?,?)');
   for (const r of rows) {
     const lat = r.latency ?? 1000;
     const endMs = Date.now() - r.startAgoMs + lat;
-    st.run(r.session, r.model ?? 'claude-opus-5-5', r.request_model ?? 'claude-opus-5', r.status ?? 200, Math.floor(endMs / 1000), lat);
+    st.run(r.id ?? crypto.randomUUID(), r.session, r.model ?? 'claude-opus-5-5', r.request_model ?? 'claude-opus-5', r.status ?? 200, Math.floor(endMs / 1000), lat);
   }
   db.close();
+}
+// 带 message.id 的主会话 transcript（ids 从旧到新）；子代理条目在单独文件里，主 transcript 里只有主会话自己的回复
+function idTranscript(c, ids, agoMs = 60000) {
+  fs.writeFileSync(c.transcript, ids.map((id) =>
+    JSON.stringify({ type: 'assistant', isSidechain: false, message: { id, model: 'claude-opus-5-5' }, timestamp: iso(Date.now() - agoMs) }) + '\n').join(''));
 }
 function run(c, input, env = {}, extraArgs = []) {
   return new Promise((resolve) => {
@@ -417,6 +424,106 @@ const cases = {
     fs.writeFileSync(c.transcript, JSON.stringify({ type: 'user', timestamp: iso(Date.now()), message: { content: 'x'.repeat(300000) } }) + '\n');
     const r = await p;
     check('T44 改写为超长新 user 条目→保守退出', isExit(r, 'transcript-unreadable'), brief(r));
+  },
+  async T45() {
+    // 2026-10-10 实测故障：子代理请求 claude-sonnet-5 被路由到与主会话相同的上游 claude-opus-5-5，session_id 也相同
+    const c = mkCase('T45'); idTranscript(c, ['msg_m1']);
+    dbAdd(c.db, [
+      { session: 's45', startAgoMs: 4000, id: 'session:msg_m1' },
+      { session: 's45', startAgoMs: 500, id: 'session:msg_s1', request_model: 'claude-sonnet-5' },
+    ]);
+    const p = run(c, inp(c, 's45', [SUB]), { CACHE_KEEPALIVE_FIRE_AFTER_S: '9' });
+    await sleep(3000); dbAdd(c.db, [{ session: 's45', startAgoMs: 500, id: 'session:msg_s2', request_model: 'claude-sonnet-5' }]);
+    const r = await p;
+    check('T45 子代理与主会话同上游：锚点取主会话 id 行，Stop 后子代理请求不算活动→wake',
+      isWake(r) && r.secs < 7.5 && r.last.mainRequestModel === 'claude-opus-5' && r.last.upstreamModel === 'claude-opus-5-5',
+      brief(r) + ` mainReq=${r.last?.mainRequestModel}`);
+  },
+  async T46() {
+    const out = [];
+    for (const [status, expect] of [[200, 'wake'], [502, 'activity-ccswitch']]) {
+      const c = mkCase('T46-' + status); idTranscript(c, ['msg_m1']);
+      dbAdd(c.db, [{ session: 's46', startAgoMs: 2000, id: 'session:msg_m1' }]);
+      const p = run(c, inp(c, 's46', [SUB]), { CACHE_KEEPALIVE_FIRE_AFTER_S: '10' });
+      await waitForState(c, 's46');
+      // 子代理与主会话请求模型也相同：成功行仍可按 id 区分；失败行没有响应 id，只能按请求模型归给主会话
+      await sleep(2000); dbAdd(c.db, [{ session: 's46', startAgoMs: 0, status, ...(status === 200 ? { id: 'session:msg_s1' } : {}) }]);
+      const r = await p;
+      out.push(expect === 'wake' ? isWake(r) : isExit(r, expect), brief(r));
+    }
+    check('T46 子代理与主会话模型名完全相同：成功请求→wake；失败请求→activity-ccswitch（已知限制）', out[0] && out[2], `${out[1]} | ${out[3]}`);
+  },
+  async T47() {
+    const out = [];
+    for (const kind of ['failed', 'ok']) {
+      const c = mkCase('T47-' + kind); idTranscript(c, ['msg_m1']);
+      dbAdd(c.db, [{ session: 's47', startAgoMs: 2000, id: 'session:msg_m1' }]);
+      const p = run(c, inp(c, 's47', [SUB]), { CACHE_KEEPALIVE_FIRE_AFTER_S: '10' });
+      const state = await waitForState(c, 's47');
+      await sleep(2000);
+      if (kind === 'failed') {
+        dbAdd(c.db, [{ session: 's47', startAgoMs: 0, status: 502 }]);
+      } else {
+        // 主会话新回复写进 transcript（时间戳仍在 2 秒宽限内，不触发 activity-transcript），数据库里有同 id 的行
+        fs.appendFileSync(c.transcript, JSON.stringify({ type: 'assistant', message: { id: 'msg_m2', model: 'claude-opus-5-5' }, timestamp: iso(state.periodStart) }) + '\n');
+        dbAdd(c.db, [{ session: 's47', startAgoMs: 0, id: 'session:msg_m2' }]);
+      }
+      const r = await p;
+      out.push(isExit(r, 'activity-ccswitch'), brief(r));
+    }
+    check('T47 主会话自己的新请求（失败 / 成功）→activity-ccswitch', out[0] && out[2], `${out[1]} | ${out[3]}`);
+  },
+  async T48() {
+    const c = mkCase('T48'); idTranscript(c, ['msg_m1']);
+    dbAdd(c.db, [
+      { session: 's48', startAgoMs: 4000 },
+      { session: 's48', startAgoMs: 500, request_model: 'claude-sonnet-5', model: 'claude-sonnet-5-5' },
+    ]);
+    const r = await run(c, inp(c, 's48', [SUB]), { CACHE_KEEPALIVE_FIRE_AFTER_S: '9' });
+    check('T48 request_id 不含响应 id→退回上游模型过滤（旧行为）', isWake(r) && r.secs < 7.5 && r.last.mainRequestModel === null && r.last.upstreamModel === 'claude-opus-5-5', brief(r) + ` mainReq=${r.last?.mainRequestModel}`);
+  },
+  async T49() {
+    const c = mkCase('T49'); idTranscript(c, ['msg_m1']);
+    dbAdd(c.db, [{ session: 's49', startAgoMs: 0, id: 'session:msg_s1', request_model: 'claude-sonnet-5' }]);
+    const p = run(c, inp(c, 's49', [SUB]), { CACHE_KEEPALIVE_SETTLE_S: '3', CACHE_KEEPALIVE_FIRE_AFTER_S: '14' });
+    await waitForState(c, 's49');
+    await sleep(400); dbAdd(c.db, [{ session: 's49', startAgoMs: 8000, id: 'session:msg_m1' }]);
+    const tIns = Date.now();
+    const r = await p;
+    // 按主会话行应在入库后约 6 秒唤醒；若仍用子代理行，要到其开始后 14 秒
+    const after = Math.round((Date.now() - tIns) / 100) / 10;
+    check('T49 结算期间才入库的主会话行更早，仍替换按模型选中的子代理行', isWake(r) && after < 10 && r.last.mainRequestModel === 'claude-opus-5', brief(r) + ` afterInsert=${after}s mainReq=${r.last?.mainRequestModel}`);
+  },
+  async T50() {
+    // 主会话 id 行在结算之后才入库，同时有同上游的子代理请求：先按 id 切换匹配方式，子代理请求不算活动
+    const c = mkCase('T50'); idTranscript(c, ['msg_m1']);
+    const p = run(c, inp(c, 's50', [SUB]), { CACHE_KEEPALIVE_FIRE_AFTER_S: '38' });
+    await waitForState(c, 's50');
+    await sleep(2500);
+    dbAdd(c.db, [
+      { session: 's50', startAgoMs: 400000, id: 'session:msg_m1' },
+      { session: 's50', startAgoMs: 0, id: 'session:msg_s1', request_model: 'claude-sonnet-5' },
+    ]);
+    const r = await p;
+    check('T50 结算后才入库的主会话 id 行先切换为 id 匹配，同上游子代理请求不判 activity', isExit(r, 'stale-anchor') && r.last.mainRequestModel === 'claude-opus-5', brief(r) + ` mainReq=${r.last?.mainRequestModel}`);
+  },
+  async T51() {
+    // 没有 request_id 列的旧表结构：按 id 查询报错，必须退回上游模型过滤，而不是退回估算锚点
+    const c = mkCase('T51'); idTranscript(c, ['msg_m1']);
+    const db = new DatabaseSync(c.db);
+    db.exec('create table proxy_request_logs (session_id text, model text, request_model text, status_code integer, created_at integer, latency_ms integer)');
+    const st = db.prepare('insert into proxy_request_logs values (?,?,?,?,?,?)');
+    st.run('s51', 'claude-opus-5-5', 'claude-opus-5', 200, Math.floor((Date.now() - 3000) / 1000), 1000);
+    st.run('s51', 'claude-sonnet-5-5', 'claude-sonnet-5', 200, Math.floor((Date.now() - 500) / 1000), 1000);
+    db.close();
+    const p = run(c, inp(c, 's51', [SUB]), { CACHE_KEEPALIVE_FIRE_AFTER_S: '9' });
+    await waitForState(c, 's51');
+    await sleep(2000);
+    const db2 = new DatabaseSync(c.db);
+    db2.prepare('insert into proxy_request_logs values (?,?,?,?,?,?)').run('s51', 'claude-opus-5-5', 'claude-opus-5', 502, Math.floor(Date.now() / 1000) + 1, 1000);
+    db2.close();
+    const r = await p;
+    check('T51 无 request_id 列→锚点与活动检测都退回上游模型过滤', isExit(r, 'activity-ccswitch') && r.last.anchorSource === 'ccswitch' && r.last.upstreamModel === 'claude-opus-5-5' && r.last.mainRequestModel === null, brief(r) + ` src=${r.last?.anchorSource} up=${r.last?.upstreamModel}`);
   },
 };
 
