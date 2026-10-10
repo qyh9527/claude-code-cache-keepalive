@@ -444,10 +444,10 @@ const cases = {
     for (const [status, expect] of [[200, 'wake'], [502, 'activity-ccswitch']]) {
       const c = mkCase('T46-' + status); idTranscript(c, ['msg_m1']);
       dbAdd(c.db, [{ session: 's46', startAgoMs: 2000, id: 'session:msg_m1' }]);
-      const p = run(c, inp(c, 's46', [SUB]), { CACHE_KEEPALIVE_FIRE_AFTER_S: '8' });
+      const p = run(c, inp(c, 's46', [SUB]), { CACHE_KEEPALIVE_FIRE_AFTER_S: '10' });
       await waitForState(c, 's46');
       // 子代理与主会话请求模型也相同：成功行仍可按 id 区分；失败行没有响应 id，只能按请求模型归给主会话
-      await sleep(2500); dbAdd(c.db, [{ session: 's46', startAgoMs: 0, status, ...(status === 200 ? { id: 'session:msg_s1' } : {}) }]);
+      await sleep(2000); dbAdd(c.db, [{ session: 's46', startAgoMs: 0, status, ...(status === 200 ? { id: 'session:msg_s1' } : {}) }]);
       const r = await p;
       out.push(expect === 'wake' ? isWake(r) : isExit(r, expect), brief(r));
     }
@@ -458,15 +458,15 @@ const cases = {
     for (const kind of ['failed', 'ok']) {
       const c = mkCase('T47-' + kind); idTranscript(c, ['msg_m1']);
       dbAdd(c.db, [{ session: 's47', startAgoMs: 2000, id: 'session:msg_m1' }]);
-      const p = run(c, inp(c, 's47', [SUB]), { CACHE_KEEPALIVE_FIRE_AFTER_S: '8' });
+      const p = run(c, inp(c, 's47', [SUB]), { CACHE_KEEPALIVE_FIRE_AFTER_S: '10' });
       const state = await waitForState(c, 's47');
-      await sleep(3000);
+      await sleep(2000);
       if (kind === 'failed') {
-        dbAdd(c.db, [{ session: 's47', startAgoMs: 500, status: 502 }]);
+        dbAdd(c.db, [{ session: 's47', startAgoMs: 0, status: 502 }]);
       } else {
         // 主会话新回复写进 transcript（时间戳仍在 2 秒宽限内，不触发 activity-transcript），数据库里有同 id 的行
         fs.appendFileSync(c.transcript, JSON.stringify({ type: 'assistant', message: { id: 'msg_m2', model: 'claude-opus-5-5' }, timestamp: iso(state.periodStart) }) + '\n');
-        dbAdd(c.db, [{ session: 's47', startAgoMs: 500, id: 'session:msg_m2' }]);
+        dbAdd(c.db, [{ session: 's47', startAgoMs: 0, id: 'session:msg_m2' }]);
       }
       const r = await p;
       out.push(isExit(r, 'activity-ccswitch'), brief(r));
@@ -485,19 +485,19 @@ const cases = {
   async T49() {
     const c = mkCase('T49'); idTranscript(c, ['msg_m1']);
     dbAdd(c.db, [{ session: 's49', startAgoMs: 0, id: 'session:msg_s1', request_model: 'claude-sonnet-5' }]);
-    const p = run(c, inp(c, 's49', [SUB]), { CACHE_KEEPALIVE_FIRE_AFTER_S: '10' });
+    const p = run(c, inp(c, 's49', [SUB]), { CACHE_KEEPALIVE_SETTLE_S: '3', CACHE_KEEPALIVE_FIRE_AFTER_S: '14' });
     await waitForState(c, 's49');
-    await sleep(400); dbAdd(c.db, [{ session: 's49', startAgoMs: 5000, id: 'session:msg_m1' }]);
+    await sleep(400); dbAdd(c.db, [{ session: 's49', startAgoMs: 8000, id: 'session:msg_m1' }]);
     const tIns = Date.now();
     const r = await p;
-    // 按主会话行应在入库后约 5 秒唤醒；若仍用子代理行，要到其开始后 10 秒
+    // 按主会话行应在入库后约 6 秒唤醒；若仍用子代理行，要到其开始后 14 秒
     const after = Math.round((Date.now() - tIns) / 100) / 10;
-    check('T49 结算期间才入库的主会话行更早，仍替换按模型选中的子代理行', isWake(r) && after < 6.2 && r.last.mainRequestModel === 'claude-opus-5', brief(r) + ` afterInsert=${after}s mainReq=${r.last?.mainRequestModel}`);
+    check('T49 结算期间才入库的主会话行更早，仍替换按模型选中的子代理行', isWake(r) && after < 10 && r.last.mainRequestModel === 'claude-opus-5', brief(r) + ` afterInsert=${after}s mainReq=${r.last?.mainRequestModel}`);
   },
   async T50() {
     // 主会话 id 行在结算之后才入库，同时有同上游的子代理请求：先按 id 切换匹配方式，子代理请求不算活动
     const c = mkCase('T50'); idTranscript(c, ['msg_m1']);
-    const p = run(c, inp(c, 's50', [SUB]), { CACHE_KEEPALIVE_FIRE_AFTER_S: '36' });
+    const p = run(c, inp(c, 's50', [SUB]), { CACHE_KEEPALIVE_FIRE_AFTER_S: '38' });
     await waitForState(c, 's50');
     await sleep(2500);
     dbAdd(c.db, [
