@@ -507,6 +507,24 @@ const cases = {
     const r = await p;
     check('T50 结算后才入库的主会话 id 行先切换为 id 匹配，同上游子代理请求不判 activity', isExit(r, 'stale-anchor') && r.last.mainRequestModel === 'claude-opus-5', brief(r) + ` mainReq=${r.last?.mainRequestModel}`);
   },
+  async T51() {
+    // 没有 request_id 列的旧表结构：按 id 查询报错，必须退回上游模型过滤，而不是退回估算锚点
+    const c = mkCase('T51'); idTranscript(c, ['msg_m1']);
+    const db = new DatabaseSync(c.db);
+    db.exec('create table proxy_request_logs (session_id text, model text, request_model text, status_code integer, created_at integer, latency_ms integer)');
+    const st = db.prepare('insert into proxy_request_logs values (?,?,?,?,?,?)');
+    st.run('s51', 'claude-opus-5-5', 'claude-opus-5', 200, Math.floor((Date.now() - 3000) / 1000), 1000);
+    st.run('s51', 'claude-sonnet-5-5', 'claude-sonnet-5', 200, Math.floor((Date.now() - 500) / 1000), 1000);
+    db.close();
+    const p = run(c, inp(c, 's51', [SUB]), { CACHE_KEEPALIVE_FIRE_AFTER_S: '9' });
+    await waitForState(c, 's51');
+    await sleep(2000);
+    const db2 = new DatabaseSync(c.db);
+    db2.prepare('insert into proxy_request_logs values (?,?,?,?,?,?)').run('s51', 'claude-opus-5-5', 'claude-opus-5', 502, Math.floor(Date.now() / 1000) + 1, 1000);
+    db2.close();
+    const r = await p;
+    check('T51 无 request_id 列→锚点与活动检测都退回上游模型过滤', isExit(r, 'activity-ccswitch') && r.last.anchorSource === 'ccswitch' && r.last.upstreamModel === 'claude-opus-5-5' && r.last.mainRequestModel === null, brief(r) + ` src=${r.last?.anchorSource} up=${r.last?.upstreamModel}`);
+  },
 };
 
 const t0 = Date.now();
