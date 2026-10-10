@@ -620,12 +620,13 @@ async function main() {
     }
 
     // c. New requests in the database: first check requests of any status (failed ones count as activity), then separately check whether a successful request moves the anchor
+    // The anchor query runs first: an id row written after settling switches matching to message ids before activity is classified
+    const okRow = await queryMainAnchor();
     const anyRow = await queryMainActivity();
     if (anyRow !== null && anyRow.start > hookStart) {
       log({ ...stamp(), decision: 'exit', reason: 'activity-ccswitch', anchorSource, anchorAgeS: secs(Date.now() - anchor) });
       return 0;
     }
-    const okRow = await queryMainAnchor();
     // The fallback anchor is only an estimate: adopt a real successful request unconditionally; with a real anchor, accept only later requests
     // (or the first id-matched one, see step 4)
     if (okRow !== null && (anchorSource === 'fallback' || (okRow.byId && !anchorById) || okRow.start > anchor)) {

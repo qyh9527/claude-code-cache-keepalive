@@ -494,6 +494,19 @@ const cases = {
     const after = Math.round((Date.now() - tIns) / 100) / 10;
     check('T49 结算期间才入库的主会话行更早，仍替换按模型选中的子代理行', isWake(r) && after < 6.2 && r.last.mainRequestModel === 'claude-opus-5', brief(r) + ` afterInsert=${after}s mainReq=${r.last?.mainRequestModel}`);
   },
+  async T50() {
+    // 主会话 id 行在结算之后才入库，同时有同上游的子代理请求：先按 id 切换匹配方式，子代理请求不算活动
+    const c = mkCase('T50'); idTranscript(c, ['msg_m1']);
+    const p = run(c, inp(c, 's50', [SUB]), { CACHE_KEEPALIVE_FIRE_AFTER_S: '36' });
+    await waitForState(c, 's50');
+    await sleep(2500);
+    dbAdd(c.db, [
+      { session: 's50', startAgoMs: 400000, id: 'session:msg_m1' },
+      { session: 's50', startAgoMs: 0, id: 'session:msg_s1', request_model: 'claude-sonnet-5' },
+    ]);
+    const r = await p;
+    check('T50 结算后才入库的主会话 id 行先切换为 id 匹配，同上游子代理请求不判 activity', isExit(r, 'stale-anchor') && r.last.mainRequestModel === 'claude-opus-5', brief(r) + ` mainReq=${r.last?.mainRequestModel}`);
+  },
 };
 
 const t0 = Date.now();
