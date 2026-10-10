@@ -18,7 +18,7 @@ hook 配置为 `asyncRewake: true`：它在后台运行，不阻塞 Claude Code�
    - 运行超过 20 分钟的 shell 任务。
 
    没有符合条件的任务就直接退出。
-2. **确定锚点**，即本会话最近一次成功的 Claude 请求的开始时间。锚点从 [CC Switch](https://github.com/farion1231/cc-switch) 的请求日志里只读查询（`~/.cc-switch/cc-switch.db` 的 `proxy_request_logs` 表），会排除 haiku 旁路请求和子代理模型（`CLAUDE_CODE_SUBAGENT_MODEL`）。没有这个库时，用"Stop 时刻减 30 秒"兜底。
+2. **确定锚点**，即本会话最近一次成功的 Claude 请求的开始时间。锚点从 [CC Switch](https://github.com/farion1231/cc-switch) 的请求日志里只读查询（`~/.cc-switch/cc-switch.db` 的 `proxy_request_logs` 表）。子代理和主会话共用 `session_id`，还可能被路由到同一个上游模型，所以只认 `request_id` 里带有主 transcript 消息 id 的行（CC Switch 4.0.6 记为 `session:<响应 id>`）；找不到这样的行时，改为按主会话最后一条回复的上游模型匹配。haiku 旁路请求和子代理模型（`CLAUDE_CODE_SUBAGENT_MODEL`）会被排除。没有这个库时，用"Stop 时刻减 30 秒"兜底。
 3. **睡到锚点 + 270 秒，醒来后重新检查。** 下面任一条件成立就静默退出：
    - 同一会话有更新的 `Stop` 接管；
    - transcript 出现了时间戳晚于 hook 启动的条目，例如用户消息或任务完成通知；
@@ -181,7 +181,7 @@ node install.mjs --any-model   # 想切回默认，不带这个参数再运行�
 > 开启前先确认这三点：
 > - **时间参数是按 5 分钟 TTL 定的。** hook 在 270 秒时触发，超过 300 秒就视为缓存已过期。供应商的 TTL 不同，就要调整 `FIRE_AFTER_MS` 和 `STALE_MS`。
 > - **有的供应商根本不需要保活。** 如果它的缓存不会按这个时间表过期，每次保活都是浪费。
-> - **子代理要用不同的模型。** 如果子代理和主会话用同一个模型名，又没有设置 `CLAUDE_CODE_SUBAGENT_MODEL`，子代理的请求会被当成主会话的活动，hook 就会直接退出，不再唤醒会话。
+> - **子代理的失败请求可能被当成主会话。** 成功的请求按消息 id 区分；失败的请求没有响应 id，只能按请求模型归属。如果子代理和主会话用同一个模型名，子代理的失败请求会被当成主会话的活动，hook 就会直接退出，不再唤醒会话。数据库里没有消息 id 时（不记录响应 id 的 CC Switch 版本），和以前一样，凡是上游模型与主会话相同的子代理请求都会被算进来。
 
 ## 日志与状态
 
@@ -262,7 +262,7 @@ Remove-Item Env:FUZZ_PATH,Env:FUZZ_SEED
 - **依赖模型配合：** 只是要求模型简短回复、不调用工具，无法强制。
 - **界面提示：** Claude Code 会把唤醒显示为 "Stop hook blocking error"，只是显示问题。
 - **竞态窗口：** 并发的 Stop 仍可能在毫秒级窗口内和最后一次提交发生竞争；脚本没有跨进程锁。
-- **CC Switch 4.x：** 没有在 4.x 上验证数据库结构。查询失败时会退回兜底锚点。
+- **CC Switch 4.x：** 只在 4.0.6 上验证过数据库结构。查询失败时会退回兜底锚点。
 
 ## 许可证
 

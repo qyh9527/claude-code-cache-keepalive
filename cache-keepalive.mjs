@@ -12,9 +12,13 @@
 //   CACHE_KEEPALIVE_SETTLE_S / CACHE_KEEPALIVE_FIRE_AFTER_S
 // The subagent model can be excluded via CLAUDE_CODE_SUBAGENT_MODEL so its requests are not
 // mistaken for main-session requests.
-// Per-call subagent models (the model parameter of an Agent call) are filtered by matching the
-// database model column against message.model of the main session's last assistant entry in the
-// transcript; known limitation: a subagent using the same model as the main session cannot be told apart.
+// Subagent requests share the main session's session_id and may be routed to the same upstream model,
+// so main-session rows are matched by message id: CC Switch records the upstream response id in
+// request_id ("session:<id>"), which equals message.id of the main session's assistant entries in the
+// transcript. Failed requests carry no response id; they are attributed by the main session's
+// request_model instead (known limitation: a failed subagent request with the same request model
+// counts as main-session activity). If no message id is found in the database, the upstream model
+// column is matched against the main session's message.model, as before.
 //
 // Command-line arguments:
 //   --any-model  Not limited to the Claude family: main-session requests no longer need a
@@ -54,6 +58,7 @@ const SHELL_MAX_AGE_MS = 20 * 60 * 1000; // shell tasks alive for more than 20 m
 const TRANSCRIPT_TAIL_BYTES = 256 * 1024; // transcript activity detection only looks at the last 256KB
 const TRANSCRIPT_LAG_MS = 2000;     // 2s grace for assistant entries only, tolerating this turn's late Stop writes; a new user entry counts as activity immediately
 const LOG_MAX_BYTES = 1024 * 1024;  // rotate the log once it exceeds 1MB
+const MAIN_IDS_MAX = 100;           // match at most the 100 newest main-session message ids
 
 const TASK_TYPES = new Set(['subagent', 'shell', 'workflow']);
 const ACTIVE_STATUSES = new Set(['running', 'pending']);
@@ -159,15 +164,18 @@ function deleteFile(p) {
 // reached the upstream, did not refresh the cache, and cannot serve as an anchor. When checking
 // whether the session has resumed activity, okOnly=false is used and requests of any status count.
 let sqliteModule = null;
-// Returns { start, model } or null; model is the real upstream model name (it changes when CC Switch switches to a non-Claude provider)
-// mainModel (optional): the main-session model; when non-empty, only rows whose upstream model column equals it are taken, excluding subagent requests with a per-call model.
-async function queryLatestRow(sessionId, { okOnly = false, mainModel = null } = {}) {
+// Returns { start, model, requestModel } or null; model is the real upstream model name (it changes when CC Switch switches to a non-Claude provider)
+// main (optional) keeps only the main session's own rows, excluding subagent requests:
+//   ids: main-session message ids; a row matches when the part of request_id after the first ':' is one of them.
+//   requestModel: with ids and okOnly=false, failed rows (no response id) whose request_model equals it also match.
+//   model: used only without ids; the upstream model column must equal it.
+async function queryLatestRow(sessionId, { okOnly = false, main = null } = {}) {
   let db = null;
   try {
     if (sqliteModule === null) sqliteModule = await import('node:sqlite');
     db = new sqliteModule.DatabaseSync(DB_PATH, { readOnly: true });
     let sql =
-      'select created_at, latency_ms, model from proxy_request_logs ' +
+      'select created_at, latency_ms, model, request_model from proxy_request_logs ' +
       'where session_id = ? ' +
       (ANY_MODEL
         ? ''
@@ -179,9 +187,18 @@ async function queryLatestRow(sessionId, { okOnly = false, mainModel = null } = 
       sql += 'and request_model <> ? ';
       params.push(SUBAGENT_MODEL);
     }
-    if (mainModel) {
+    if (main && main.ids && main.ids.length > 0) {
+      const idMatch = `substr(request_id, instr(request_id, ':') + 1) in (${main.ids.map(() => '?').join(',')})`;
+      if (!okOnly && main.requestModel) {
+        sql += `and (${idMatch} or (status_code <> 200 and request_model = ?)) `;
+        params.push(...main.ids, main.requestModel);
+      } else {
+        sql += `and ${idMatch} `;
+        params.push(...main.ids);
+      }
+    } else if (main && main.model) {
       sql += 'and model = ? ';
-      params.push(mainModel);
+      params.push(main.model);
     }
     if (okOnly) sql += 'and status_code = 200 ';
     sql += 'order by (created_at*1000 - coalesce(latency_ms,0)) desc limit 1';
@@ -191,6 +208,7 @@ async function queryLatestRow(sessionId, { okOnly = false, mainModel = null } = 
     return {
       start: row.created_at * 1000 - (Number.isFinite(latency) ? latency : 0),
       model: row.model != null ? String(row.model) : null,
+      requestModel: row.request_model != null ? String(row.request_model) : null,
     };
   } catch {
     return null; // database missing / table missing / lock conflict → handled by the fallback
@@ -276,21 +294,29 @@ function parseJsonLine(line) {
 // nor do subagent (isSidechain) entries.
 const isMainTurnEntry = (o) => (o.type === 'user' || o.type === 'assistant') && o.isSidechain !== true;
 
-// Main-session model: message.model of the last main-session assistant entry in the transcript tail; null if unavailable.
-// Skips the "<synthetic>" placeholder model that Claude Code generates itself.
-function readMainModel(p) {
+// Main session in the transcript tail: { model, ids }. model is message.model of the last main-session assistant
+// entry (null if unavailable; skips the "<synthetic>" placeholder model that Claude Code generates itself);
+// ids are the message ids of main-session assistant entries, newest first, at most MAIN_IDS_MAX.
+function readMainInfo(p) {
+  const info = { model: null, ids: [] };
   const cur = snapshotFile(p);
-  if (cur === null) return null;
+  if (cur === null) return info;
   const tail = readTranscriptTail(p, cur.size);
-  if (tail === null) return null;
+  if (tail === null) return info;
   const { lines } = tail;
   for (let i = lines.length - 1; i >= 0; i--) {
+    if (info.model !== null && info.ids.length >= MAIN_IDS_MAX) break;
     const o = parseJsonLine(lines[i]);
     if (!o || o.type !== 'assistant' || o.isSidechain === true) continue;
-    const m = o.message && typeof o.message === 'object' ? o.message.model : null;
-    if (typeof m === 'string' && m.trim() && !m.startsWith('<')) return m.trim();
+    const msg = o.message && typeof o.message === 'object' ? o.message : null;
+    if (msg === null) continue;
+    const m = msg.model;
+    if (info.model === null && typeof m === 'string' && m.trim() && !m.startsWith('<')) info.model = m.trim();
+    if (typeof msg.id === 'string' && msg.id && info.ids.length < MAIN_IDS_MAX && !info.ids.includes(msg.id)) {
+      info.ids.push(msg.id);
+    }
   }
-  return null;
+  return info;
 }
 
 // Returns 'idle' | 'active' | 'unreadable'
@@ -460,6 +486,7 @@ async function main() {
     anchorAgeS: null,
     upstreamModel: null,
     mainModel: null,
+    mainRequestModel: null,
     wakes,
     periodAgeS: null,
     late: false,
@@ -483,15 +510,44 @@ async function main() {
 
   // 4. Anchor (only successful main-session requests count)
   // Read the main-session model once at Stop: the last main reply is already in the transcript by now
-  const mainModel = readMainModel(transcriptPath);
+  const mainModel = readMainInfo(transcriptPath).model;
   ctx.mainModel = mainModel;
+  // Main-session rows are matched by message id once an id has been found in the database; until then (or with a
+  // CC Switch that does not record response ids) the upstream model filter is used, as before.
+  // Message ids are re-read on every query so that replies written after Stop are included.
+  // An id-matched row replaces a model-matched anchor even if it is older: the latter may be a subagent request.
+  let matchById = false;
+  let mainRequestModel = null;
+  const mainFilter = () => {
+    const { ids } = readMainInfo(transcriptPath);
+    return ids.length > 0 ? { ids, requestModel: mainRequestModel } : { model: mainModel };
+  };
+  const queryMainAnchor = async () => {
+    const main = mainFilter();
+    if (main.ids) {
+      const row = await queryLatestRow(session, { okOnly: true, main });
+      if (row !== null) {
+        matchById = true;
+        mainRequestModel = row.requestModel;
+        ctx.mainRequestModel = mainRequestModel;
+        return { ...row, byId: true };
+      }
+      if (matchById) return null;
+    }
+    const row = await queryLatestRow(session, { okOnly: true, main: { model: mainModel } });
+    return row !== null ? { ...row, byId: false } : null;
+  };
+  const queryMainActivity = () =>
+    queryLatestRow(session, { okOnly: false, main: matchById ? mainFilter() : { model: mainModel } });
   let anchor;
   let anchorSource;
   let anchorModel = null;
-  const a0 = await queryLatestRow(session, { okOnly: true, mainModel });
+  let anchorById = false;
+  const a0 = await queryMainAnchor();
   if (a0 !== null) {
     anchor = a0.start;
     anchorModel = a0.model;
+    anchorById = a0.byId;
     anchorSource = 'ccswitch';
   } else {
     anchor = hookStart - ANCHOR_FALLBACK_MS;
@@ -505,10 +561,11 @@ async function main() {
     setTimeout(() => { throw new Error('test-throw-async'); }, 5);
     await sleep(50);
   }
-  const a1 = await queryLatestRow(session, { okOnly: true, mainModel });
-  if (a1 !== null && (anchorSource === 'fallback' || a1.start > anchor)) {
+  const a1 = await queryMainAnchor();
+  if (a1 !== null && (anchorSource === 'fallback' || (a1.byId && !anchorById) || a1.start > anchor)) {
     anchor = a1.start;
     anchorModel = a1.model;
+    anchorById = a1.byId;
     anchorSource = 'ccswitch';
   }
   if (anchorSource === 'ccswitch') {
@@ -563,16 +620,18 @@ async function main() {
     }
 
     // c. New requests in the database: first check requests of any status (failed ones count as activity), then separately check whether a successful request moves the anchor
-    const anyRow = await queryLatestRow(session, { okOnly: false, mainModel });
+    const anyRow = await queryMainActivity();
     if (anyRow !== null && anyRow.start > hookStart) {
       log({ ...stamp(), decision: 'exit', reason: 'activity-ccswitch', anchorSource, anchorAgeS: secs(Date.now() - anchor) });
       return 0;
     }
-    const okRow = await queryLatestRow(session, { okOnly: true, mainModel });
+    const okRow = await queryMainAnchor();
     // The fallback anchor is only an estimate: adopt a real successful request unconditionally; with a real anchor, accept only later requests
-    if (okRow !== null && (anchorSource === 'fallback' || okRow.start > anchor)) {
+    // (or the first id-matched one, see step 4)
+    if (okRow !== null && (anchorSource === 'fallback' || (okRow.byId && !anchorById) || okRow.start > anchor)) {
       anchor = okRow.start; // a successful request sent before Stop but written to the database late: move the anchor forward and restart the timer
       anchorModel = okRow.model;
+      anchorById = okRow.byId;
       anchorSource = 'ccswitch';
       ctx.anchorSource = anchorSource;
       ctx.upstreamModel = anchorModel;

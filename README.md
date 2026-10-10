@@ -13,7 +13,7 @@ The hook is configured with `asyncRewake: true`, so it runs in the background an
 On every `Stop`:
 
 1. **Is the session waiting for something?** It reads `background_tasks` from the hook input. Only running or pending `subagent`, `shell`, and `workflow` tasks count. Shell tasks that look long-lived are ignored: dev servers, watchers, `tail -f`, `docker compose up` without `-d`, and any shell task that has been running for more than 20 minutes. If nothing qualifies, the hook exits.
-2. **Find the anchor**, the start time of the session's latest successful Claude request. It is read-only from the [CC Switch](https://github.com/farion1231/cc-switch) request log (`~/.cc-switch/cc-switch.db`, table `proxy_request_logs`). Haiku side requests and the subagent model (`CLAUDE_CODE_SUBAGENT_MODEL`) are excluded. Without that database, the hook falls back to "Stop time minus 30 seconds".
+2. **Find the anchor**, the start time of the session's latest successful Claude request. It is read-only from the [CC Switch](https://github.com/farion1231/cc-switch) request log (`~/.cc-switch/cc-switch.db`, table `proxy_request_logs`). Subagents share the main session's `session_id` and may be routed to the same upstream model, so only rows whose `request_id` carries a message id from the main transcript count (CC Switch 4.0.6 records `session:<response id>`); if no such row is found, the hook matches the upstream model of the main session's last reply instead. Haiku side requests and the subagent model (`CLAUDE_CODE_SUBAGENT_MODEL`) are excluded. Without that database, the hook falls back to "Stop time minus 30 seconds".
 3. **Sleep until anchor + 270 s**, then re-check everything. The hook exits silently if any of these is true:
    - a newer `Stop` has taken over the same session;
    - the transcript has gained an entry timestamped after the hook started, for example a user message or a task-completion notification;
@@ -174,7 +174,7 @@ For a manual install, append `"--any-model"` to `args` after the script path. Lo
 > Check these before you turn it on:
 > - **Timing is tuned for a 5-minute TTL.** The hook fires at 270 s and treats anything older than 300 s as expired. For a provider with a different TTL, adjust `FIRE_AFTER_MS` and `STALE_MS`.
 > - **Some providers do not need it.** If their cache does not expire on that schedule, every keepalive is wasted.
-> - **Subagents must use a different model.** If a subagent uses the same model name as the main session and `CLAUDE_CODE_SUBAGENT_MODEL` is not set, its requests look like main-session activity. The hook then exits instead of waking the session.
+> - **Failed subagent requests can look like the main session.** Successful requests are told apart by message id. A failed request has no response id, so it is attributed by request model: if a subagent uses the same model name as the main session, its failed requests count as main-session activity and the hook exits instead of waking the session. Without message ids in the database (CC Switch versions that do not record them), every subagent request with the main session's upstream model counts, as before.
 
 ## Logs and state
 
@@ -255,7 +255,7 @@ Replace the example seed and path with the failure report's values. Turn confirm
 - **Relies on the model:** the model is asked, not forced, to reply briefly and call no tools.
 - **UI label:** Claude Code labels the wake as "Stop hook blocking error". This is cosmetic.
 - **Narrow races:** a concurrent Stop can still race the final commit within a window of milliseconds. There is no cross-process lock.
-- **CC Switch 4.x:** the database layout has not been verified on 4.x. If the query fails, the hook falls back to the estimated anchor.
+- **CC Switch 4.x:** the database layout has only been verified on 4.0.6. If the query fails, the hook falls back to the estimated anchor.
 
 ## License
 
